@@ -13,6 +13,12 @@ namespace OpenDeepWiki.Tests.Services.Repositories;
 
 public class IncrementalUpdateWorkerTests
 {
+    private const string SnapshotHash =
+        "8FDD97DF787CB40485E5D1BDA171AC1608EDEE9649D107E3E6B6C1D4A0E28C0A";
+
+    private const string GitCommitA = "4d24129e28470a23b7d755ba1eeb58fce09447ac";
+    private const string GitCommitB = "71d424d03595ecc2350215bbf03f6e6944e71a83";
+
     [Fact]
     public async Task CheckScheduledUpdatesAsync_WhenRemoteHeadMatchesLastCommit_DoesNotCreateTask()
     {
@@ -57,6 +63,92 @@ public class IncrementalUpdateWorkerTests
         Assert.Equal(IncrementalUpdateStatus.Pending, task.Status);
         Assert.Equal("old-sha", task.PreviousCommitId);
         Assert.Equal("new-sha", task.TargetCommitId);
+        Assert.False(task.IsManualTrigger);
+        analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task CheckScheduledUpdatesAsync_WhenLocalGitSourceHasSnapshotBaseline_NormalizesWithoutTask()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            updateIntervalMinutes: 60,
+            lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath("/tmp/source-repo"));
+        var branch = SeedBranch(context, repository.Id, "smart-hw/os_services_develop", SnapshotHash);
+        var originalLastProcessedAt = branch.LastProcessedAt;
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(GitCommitA);
+
+        var worker = CreateWorker();
+
+        await InvokeCheckScheduledUpdatesAsync(worker, context, Mock.Of<IGitPlatformService>(), analyzer.Object);
+
+        Assert.Empty(await context.IncrementalUpdateTasks.ToListAsync());
+        var updatedBranch = await context.RepositoryBranches.SingleAsync(b => b.Id == branch.Id);
+        Assert.Equal(GitCommitA, updatedBranch.LastCommitId);
+        Assert.Equal(originalLastProcessedAt, updatedBranch.LastProcessedAt);
+        analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task CheckScheduledUpdatesAsync_WhenLocalGitSourceCommitChanges_CreatesPendingTask()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            updateIntervalMinutes: 60,
+            lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath("/tmp/source-repo"));
+        var branch = SeedBranch(context, repository.Id, "smart-hw/os_services_develop", GitCommitA);
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(GitCommitB);
+
+        var worker = CreateWorker();
+
+        await InvokeCheckScheduledUpdatesAsync(worker, context, Mock.Of<IGitPlatformService>(), analyzer.Object);
+
+        var task = await context.IncrementalUpdateTasks.SingleAsync();
+        Assert.Equal(IncrementalUpdateStatus.Pending, task.Status);
+        Assert.Equal(GitCommitA, task.PreviousCommitId);
+        Assert.Equal(GitCommitB, task.TargetCommitId);
+        Assert.False(task.IsManualTrigger);
+        analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task CheckScheduledUpdatesAsync_WhenLocalDirectoryHasNoGitHead_CreatesSnapshotTask()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            updateIntervalMinutes: 60,
+            lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath("/tmp/plain-directory"));
+        var branch = SeedBranch(context, repository.Id, "main", SnapshotHash);
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string?)null);
+
+        var worker = CreateWorker();
+
+        await InvokeCheckScheduledUpdatesAsync(worker, context, Mock.Of<IGitPlatformService>(), analyzer.Object);
+
+        var task = await context.IncrementalUpdateTasks.SingleAsync();
+        Assert.Equal(SnapshotHash, task.PreviousCommitId);
+        Assert.Null(task.TargetCommitId);
         Assert.False(task.IsManualTrigger);
         analyzer.VerifyAll();
     }
@@ -213,13 +305,14 @@ public class IncrementalUpdateWorkerTests
         TestDbContext context,
         int? updateIntervalMinutes,
         DateTime? lastUpdateCheckAt,
-        bool isDeleted = false)
+        bool isDeleted = false,
+        string? gitUrl = null)
     {
         var repository = new Repository
         {
             Id = Guid.NewGuid().ToString(),
             OwnerUserId = "user-1",
-            GitUrl = "https://example.com/demo/repo.git",
+            GitUrl = gitUrl ?? "https://example.com/demo/repo.git",
             OrgName = "demo",
             RepoName = "repo",
             Status = RepositoryStatus.Completed,
