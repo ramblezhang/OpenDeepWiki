@@ -292,6 +292,7 @@ public class IncrementalUpdateWorker : BackgroundService
                 .Where(b => b.RepositoryId == repository.Id && !b.IsDeleted)
                 .ToListAsync(stoppingToken);
 
+            var sourceInfo = RepositorySource.Parse(repository.GitUrl);
             var saveChanges = false;
 
             foreach (var branch in branches)
@@ -349,7 +350,7 @@ public class IncrementalUpdateWorker : BackgroundService
 
                 if (string.IsNullOrWhiteSpace(remoteCommitId))
                 {
-                    if (RepositorySource.IsGit(repository.GitUrl))
+                    if (sourceInfo.SourceType == RepositorySourceType.Git)
                     {
                         _logger.LogWarning(
                             "Remote HEAD was not found. Repository: {Org}/{Repo}, Branch: {Branch}",
@@ -375,7 +376,7 @@ public class IncrementalUpdateWorker : BackgroundService
                     continue;
                 }
 
-                if (ShouldNormalizeSnapshotBaseline(branch.LastCommitId, remoteCommitId))
+                if (ShouldNormalizeSnapshotBaseline(sourceInfo, branch.LastCommitId, remoteCommitId))
                 {
                     NormalizeSnapshotBaseline(repository, branch, remoteCommitId);
                     saveChanges = true;
@@ -421,16 +422,25 @@ public class IncrementalUpdateWorker : BackgroundService
             remoteCommitId);
     }
 
-    private static bool ShouldNormalizeSnapshotBaseline(string? previousCommitId, string remoteCommitId)
+    private static bool ShouldNormalizeSnapshotBaseline(
+        RepositorySourceInfo sourceInfo,
+        string? previousCommitId,
+        string remoteCommitId)
     {
-        return !string.IsNullOrWhiteSpace(previousCommitId) &&
+        return sourceInfo.SourceType == RepositorySourceType.LocalDirectory &&
                IsGitCommitId(remoteCommitId) &&
-               !IsGitCommitId(previousCommitId);
+               IsDirectorySnapshotId(previousCommitId);
     }
 
     private static bool IsGitCommitId(string? commitId)
     {
         return commitId is { Length: 40 } &&
+               commitId.All(Uri.IsHexDigit);
+    }
+
+    private static bool IsDirectorySnapshotId(string? commitId)
+    {
+        return commitId is { Length: 64 } &&
                commitId.All(Uri.IsHexDigit);
     }
 
