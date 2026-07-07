@@ -18,7 +18,9 @@ import {
   regenerateRepository,
 } from "@/lib/repository-api";
 import { RepositoryExplorerView } from "@/components/repo/repository-explorer-view";
+import { getRepositoryDisplayPath } from "@/components/repo/repository-explorer-tree";
 import type {
+  RepositoryEffectiveStatus,
   RepositoryItemResponse,
   RepositoryStatus,
 } from "@/types/repository";
@@ -39,6 +41,11 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildRepoBasePath } from "@/lib/repo-route";
+import {
+  getRepositoryEffectiveStatusClassName,
+  getRepositoryEffectiveStatusLabel,
+  isRepositoryEffectiveStatusActive,
+} from "@/lib/repository-effective-status";
 import { VisibilityToggle } from "@/components/repo/visibility-toggle";
 import { toast } from "sonner";
 
@@ -76,22 +83,39 @@ const STATUS_CONFIG: Record<RepositoryStatus, {
   },
 };
 
-function StatusBadge({ status }: { status: RepositoryStatus }) {
+function StatusBadge({
+  status,
+  fallbackStatus,
+}: {
+  status?: RepositoryEffectiveStatus;
+  fallbackStatus: RepositoryStatus;
+}) {
   const t = useTranslations();
-  const config = STATUS_CONFIG[status];
-  const Icon = config.icon;
+  const isActive = isRepositoryEffectiveStatusActive(status);
+  const isQueued = status === "AllBranchesQueued" || status === "PartialBranchesQueued" || status === "RepositoryFullPending";
+  const fallbackConfig = STATUS_CONFIG[fallbackStatus];
+  const Icon = status === "Failed" || status === "PartialFailed"
+    ? XCircle
+    : isQueued
+      ? Clock
+      : isActive
+        ? Loader2
+        : fallbackConfig.icon;
+  const label = status
+    ? getRepositoryEffectiveStatusLabel(status, fallbackStatus)
+    : t(`home.repository.status.${fallbackConfig.labelKey}`);
 
   return (
     <span
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium",
-        config.className
+        status ? getRepositoryEffectiveStatusClassName(status, fallbackStatus) : fallbackConfig.className
       )}
     >
       <Icon
-        className={cn("h-3.5 w-3.5", status === "Processing" && "animate-spin")}
+        className={cn("h-3.5 w-3.5", isActive && "animate-spin")}
       />
-      {t(`home.repository.status.${config.labelKey}`)}
+      {label}
     </span>
   );
 }
@@ -109,6 +133,9 @@ function RepositoryCard({
 }) {
   const t = useTranslations();
   const createdDate = new Date(repo.createdAt).toLocaleDateString();
+  const branchFullProcessing = repo.statusCounts?.branchFullProcessing ?? 0;
+  const branchFullPending = repo.statusCounts?.branchFullPending ?? 0;
+  const incrementalActive = (repo.statusCounts?.incrementalPending ?? 0) + (repo.statusCounts?.incrementalProcessing ?? 0);
 
   // 生成正确编码的Wiki导航URL
   // 使用encodeURIComponent处理特殊字符，确保URL安全
@@ -126,7 +153,7 @@ function RepositoryCard({
             <div className="flex items-center gap-2">
               <GitBranch className="h-4 w-4 text-muted-foreground shrink-0" />
               <h3 className="font-medium truncate">
-                {repo.orgName}/{repo.repoName}
+                {getRepositoryDisplayPath(repo)}
               </h3>
             </div>
             <div className="mt-2">
@@ -140,12 +167,20 @@ function RepositoryCard({
             <p className="mt-2 text-xs text-muted-foreground">
               {t("home.repository.createdAt")}: {createdDate}
             </p>
-            {((repo.branchGenerationActiveCount ?? 0) > 0 || (repo.branchGenerationFailedCount ?? 0) > 0) && (
+            {((repo.branchGenerationActiveCount ?? 0) > 0 ||
+              (repo.branchGenerationFailedCount ?? 0) > 0 ||
+              incrementalActive > 0) && (
               <div className="mt-2 flex flex-wrap gap-1.5">
-                {(repo.branchGenerationActiveCount ?? 0) > 0 && (
+                {branchFullProcessing > 0 && (
                   <span className="inline-flex items-center gap-1 rounded-full bg-blue-500/10 px-2 py-1 text-xs text-blue-600">
                     <Loader2 className="h-3 w-3 animate-spin" />
-                    branch running {repo.branchGenerationActiveCount}
+                    branch generating {branchFullProcessing}
+                  </span>
+                )}
+                {branchFullPending > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-yellow-500/10 px-2 py-1 text-xs text-yellow-600">
+                    <Clock className="h-3 w-3" />
+                    branch queued {branchFullPending}
                   </span>
                 )}
                 {(repo.branchGenerationFailedCount ?? 0) > 0 && (
@@ -154,11 +189,17 @@ function RepositoryCard({
                     branch failed {repo.branchGenerationFailedCount}
                   </span>
                 )}
+                {incrementalActive > 0 && (
+                  <span className="inline-flex items-center gap-1 rounded-full bg-cyan-500/10 px-2 py-1 text-xs text-cyan-600">
+                    <RefreshCw className="h-3 w-3 animate-spin" />
+                    incremental {incrementalActive}
+                  </span>
+                )}
               </div>
             )}
           </div>
           <div className="flex flex-col items-end gap-2 shrink-0">
-            <StatusBadge status={repo.statusName} />
+            <StatusBadge status={repo.effectiveStatus} fallbackStatus={repo.statusName} />
             <VisibilityToggle
               repositoryId={repo.id}
               isPublic={repo.isPublic}

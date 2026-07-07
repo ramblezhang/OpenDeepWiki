@@ -117,4 +117,14 @@ public class RepositoryItemResponse
     /// 失败的 branch full generation 数量
     /// </summary>
     public int BranchGenerationFailedCount { get; set; }
+
+    public string EffectiveStatus { get; set; } = RepositoryEffectiveStatuses.Unknown;
+
+    public string EffectiveStatusReason { get; set; } = string.Empty;
+
+    public RepositoryStatusCountsDto StatusCounts { get; set; } = new();
+
+    public List<RepositoryActiveOperationDto> ActiveOperations { get; set; } = [];
+
+    public List<RepositoryBlockingFailureDto> BlockingFailures { get; set; } = [];
 }

@@ -13,6 +13,11 @@ export interface RepoTreeResponse {
   nodes: RepoTreeNode[];
   status: number;
   statusName: RepositoryStatus;
+  effectiveStatus?: RepositoryEffectiveStatus;
+  effectiveStatusReason?: string;
+  statusCounts?: RepositoryStatusCounts;
+  activeOperations?: RepositoryActiveOperation[];
+  blockingFailures?: RepositoryBlockingFailure[];
   exists: boolean;
   currentBranch: string;
   currentLanguage: string;
@@ -71,6 +76,49 @@ export interface RepoHeading {
 
 // Repository submission and list types
 export type RepositoryStatus = "Pending" | "Processing" | "Completed" | "Failed";
+export type RepositoryEffectiveStatus =
+  | "RepositoryFullPending"
+  | "RepositoryFullProcessing"
+  | "AllBranchesQueued"
+  | "PartialBranchesQueued"
+  | "AllBranchesGenerating"
+  | "PartialBranchesGenerating"
+  | "IncrementalUpdating"
+  | "Failed"
+  | "PartialFailed"
+  | "Completed"
+  | "Cancelled"
+  | "Unknown";
+
+export interface RepositoryStatusCounts {
+  totalBranches: number;
+  completedBranches: number;
+  failedBranches: number;
+  branchFullPending: number;
+  branchFullProcessing: number;
+  incrementalPending: number;
+  incrementalProcessing: number;
+}
+
+export interface RepositoryActiveOperation {
+  type: string;
+  repositoryId?: string;
+  branchId?: string;
+  branchName?: string;
+  taskId?: string;
+  status: string;
+  createdAt: string;
+  startedAt?: string;
+}
+
+export interface RepositoryBlockingFailure {
+  type: string;
+  branchId?: string;
+  branchName?: string;
+  taskId?: string;
+  reason: string;
+  message?: string;
+}
 
 export interface RepositorySubmitRequest {
   gitUrl: string;
@@ -124,6 +172,11 @@ export interface RepositoryItemResponse {
   primaryLanguage?: string;
   branchGenerationActiveCount?: number;
   branchGenerationFailedCount?: number;
+  effectiveStatus?: RepositoryEffectiveStatus;
+  effectiveStatusReason?: string;
+  statusCounts?: RepositoryStatusCounts;
+  activeOperations?: RepositoryActiveOperation[];
+  blockingFailures?: RepositoryBlockingFailure[];
 }
 
 export interface RepositoryListResponse {

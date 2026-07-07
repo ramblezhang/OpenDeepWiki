@@ -21,12 +21,26 @@ import {
 import { useTranslations } from "@/hooks/use-translations";
 import { fetchRepoStatus, fetchProcessingLogs, regenerateRepository } from "@/lib/repository-api";
 import { buildRepoDocPath } from "@/lib/repo-route";
-import type { ProcessingStep, RepositoryStatus } from "@/types/repository";
+import {
+  getRepositoryEffectiveStatusLabel,
+  isRepositoryEffectiveStatusActive,
+} from "@/lib/repository-effective-status";
+import type {
+  ProcessingStep,
+  RepositoryEffectiveStatus,
+  RepositoryStatus,
+  RepositoryStatusCounts,
+} from "@/types/repository";
 
 interface RepositoryProcessingStatusProps {
   owner: string;
   repo: string;
+  branch?: string;
+  lang?: string;
   status: RepositoryStatus;
+  effectiveStatus?: RepositoryEffectiveStatus;
+  effectiveStatusReason?: string;
+  statusCounts?: RepositoryStatusCounts;
 }
 
 const statusConfig: Record<
@@ -89,13 +103,52 @@ const processingSteps: Array<{
   { id: "Complete", icon: CheckCircle2, labelKey: "complete", fallback: "Complete" },
 ];
 
+function getDisplayStatusConfig(status: RepositoryEffectiveStatus | RepositoryStatus, fallback: RepositoryStatus) {
+  if (status === "Completed") return statusConfig.Completed;
+  if (status === "Failed" || status === "PartialFailed") return statusConfig.Failed;
+  if (status === "RepositoryFullPending" || status === "AllBranchesQueued" || status === "PartialBranchesQueued") {
+    return statusConfig.Pending;
+  }
+  if (status === "RepositoryFullProcessing" ||
+      status === "AllBranchesGenerating" ||
+      status === "PartialBranchesGenerating" ||
+      status === "IncrementalUpdating") {
+    return statusConfig.Processing;
+  }
+
+  return statusConfig[fallback];
+}
+
+function getDisplayStatusIcon(status: RepositoryEffectiveStatus | RepositoryStatus, fallback: RepositoryStatus) {
+  if (status === "Failed" || status === "PartialFailed") return XCircle;
+  if (status === "RepositoryFullPending" || status === "AllBranchesQueued" || status === "PartialBranchesQueued") {
+    return Clock;
+  }
+  if (status === "RepositoryFullProcessing" ||
+      status === "AllBranchesGenerating" ||
+      status === "PartialBranchesGenerating" ||
+      status === "IncrementalUpdating") {
+    return Loader2;
+  }
+
+  return statusConfig[fallback].icon;
+}
+
 export function RepositoryProcessingStatus({
   owner,
   repo,
+  branch,
+  lang,
   status: initialStatus,
+  effectiveStatus: initialEffectiveStatus,
+  effectiveStatusReason: initialEffectiveStatusReason,
+  statusCounts: initialStatusCounts,
 }: RepositoryProcessingStatusProps) {
   const t = useTranslations();
   const [status, setStatus] = useState<RepositoryStatus>(initialStatus);
+  const [effectiveStatus, setEffectiveStatus] = useState<RepositoryEffectiveStatus | undefined>(initialEffectiveStatus);
+  const [effectiveStatusReason, setEffectiveStatusReason] = useState(initialEffectiveStatusReason ?? "");
+  const [statusCounts, setStatusCounts] = useState<RepositoryStatusCounts | undefined>(initialStatusCounts);
   const [currentStep, setCurrentStep] = useState<ProcessingStep>("Workspace");
   const [totalDocuments, setTotalDocuments] = useState(0);
   const [completedDocuments, setCompletedDocuments] = useState(0);
@@ -116,8 +169,11 @@ export function RepositoryProcessingStatus({
 
   const pollStatusAndLogs = useCallback(async () => {
     try {
-      const statusResponse = await fetchRepoStatus(owner, repo);
+      const statusResponse = await fetchRepoStatus(owner, repo, branch, lang);
       setStatus(statusResponse.statusName);
+      setEffectiveStatus(statusResponse.effectiveStatus);
+      setEffectiveStatusReason(statusResponse.effectiveStatusReason ?? "");
+      setStatusCounts(statusResponse.statusCounts);
       setLastUpdated(new Date());
 
       const logsResponse = await fetchProcessingLogs(owner, repo, undefined, 500);
@@ -135,21 +191,28 @@ export function RepositoryProcessingStatus({
       }
       setCurrentStep(logsResponse.currentStepName);
 
-      if (statusResponse.statusName === "Completed" && statusResponse.defaultSlug) {
+      const isEffectivelyCompleted = !statusResponse.effectiveStatus || statusResponse.effectiveStatus === "Completed";
+      if (statusResponse.statusName === "Completed" && isEffectivelyCompleted && statusResponse.defaultSlug) {
         setIsPolling(false);
         setCurrentStep("Complete");
         setTimeout(() => {
-          window.location.href = buildRepoDocPath(owner, repo, statusResponse.defaultSlug);
+          const params = new URLSearchParams();
+          if (branch) params.set("branch", branch);
+          if (lang) params.set("lang", lang);
+          const query = params.toString();
+          window.location.href = `${buildRepoDocPath(owner, repo, statusResponse.defaultSlug)}${query ? `?${query}` : ""}`;
         }, 2000);
       }
 
-      if (statusResponse.statusName === "Failed") {
+      if (statusResponse.statusName === "Failed" ||
+          statusResponse.effectiveStatus === "Failed" ||
+          statusResponse.effectiveStatus === "PartialFailed") {
         setIsPolling(false);
       }
     } catch (error) {
       console.error("Failed to poll status:", error);
     }
-  }, [owner, repo]);
+  }, [branch, lang, owner, repo]);
 
   useEffect(() => {
     const loadInitialLogs = async () => {
@@ -238,8 +301,9 @@ export function RepositoryProcessingStatus({
     pollStatusAndLogs();
   };
 
-  const config = statusConfig[status];
-  const Icon = config.icon;
+  const displayStatus = effectiveStatus ?? status;
+  const config = getDisplayStatusConfig(displayStatus, status);
+  const Icon = getDisplayStatusIcon(displayStatus, status);
   const currentStepIndex = Math.max(0, processingSteps.findIndex((step) => step.id === currentStep));
   const finalStepIndex = processingSteps.length - 1;
   const safeTotalDocuments = Math.max(totalDocuments, 0);
@@ -253,7 +317,7 @@ export function RepositoryProcessingStatus({
   const activeStepFraction = currentStep === "Content" && safeTotalDocuments > 0
     ? documentPercent / 100
     : 0;
-  const overallPercent = status === "Completed"
+  const overallPercent = displayStatus === "Completed"
     ? 100
     : Math.min(Math.round(((currentStepIndex + activeStepFraction) / finalStepIndex) * 100), 99);
   const remainingDocuments = Math.max(safeTotalDocuments - displayedCompletedDocuments, 0);
@@ -262,8 +326,17 @@ export function RepositoryProcessingStatus({
     `home.repository.status.steps.${currentStepConfig.labelKey}`,
     currentStepConfig.fallback,
   );
-  const statusLabel = text(`home.repository.status.${status.toLowerCase()}`, config.fallback);
-  const isProcessing = status === "Processing" || status === "Pending";
+  const statusLabel = effectiveStatus
+    ? getRepositoryEffectiveStatusLabel(effectiveStatus, status)
+    : text(`home.repository.status.${status.toLowerCase()}`, config.fallback);
+  const isProcessing = status === "Processing" ||
+    status === "Pending" ||
+    isRepositoryEffectiveStatusActive(effectiveStatus) ||
+    effectiveStatus === "AllBranchesQueued" ||
+    effectiveStatus === "PartialBranchesQueued";
+  const isGenerating = status === "Processing" || isRepositoryEffectiveStatusActive(effectiveStatus);
+  const queuedBranches = statusCounts?.branchFullPending ?? 0;
+  const processingBranches = statusCounts?.branchFullProcessing ?? 0;
 
   const formatTime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -324,7 +397,7 @@ export function RepositoryProcessingStatus({
                 <div
                   className={`inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-sm ${config.borderClass} ${config.softClass} ${config.textClass}`}
                 >
-                  <Icon className={`h-4 w-4 ${status === "Processing" ? "animate-spin" : ""}`} />
+                  <Icon className={`h-4 w-4 ${isGenerating ? "animate-spin" : ""}`} />
                   <span>
                     {statusLabel}
                     {isProcessing && dots}
@@ -368,6 +441,16 @@ export function RepositoryProcessingStatus({
                 <div className="mt-1 font-medium">{safeTotalDocuments > 0 ? remainingDocuments : "-"}</div>
               </div>
             </div>
+            {(queuedBranches > 0 || processingBranches > 0 || effectiveStatusReason) && (
+              <div className="rounded-lg border border-border bg-muted/30 p-4 text-sm">
+                <div className="font-medium">{statusLabel}</div>
+                <div className="mt-2 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                  {processingBranches > 0 && <span>正在生成 {processingBranches}</span>}
+                  {queuedBranches > 0 && <span>排队等待 {queuedBranches}</span>}
+                  {effectiveStatusReason && <span>{effectiveStatusReason}</span>}
+                </div>
+              </div>
+            )}
           </section>
 
           <section className="min-w-0 rounded-lg border border-border bg-muted/20 p-4 sm:p-5">

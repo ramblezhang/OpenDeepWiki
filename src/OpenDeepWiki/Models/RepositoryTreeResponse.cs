@@ -37,6 +37,16 @@ public class RepositoryTreeResponse
     /// </summary>
     public string StatusName => Status.ToString();
 
+    public string EffectiveStatus { get; set; } = RepositoryEffectiveStatuses.Unknown;
+
+    public string EffectiveStatusReason { get; set; } = string.Empty;
+
+    public RepositoryStatusCountsDto StatusCounts { get; set; } = new();
+
+    public List<RepositoryActiveOperationDto> ActiveOperations { get; set; } = [];
+
+    public List<RepositoryBlockingFailureDto> BlockingFailures { get; set; } = [];
+
     /// <summary>
     /// 仓库是否存在
     /// </summary>

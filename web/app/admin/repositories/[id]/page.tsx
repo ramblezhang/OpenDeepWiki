@@ -64,6 +64,10 @@ import {
   AdminRepositoryScanPlan,
   UpdateRepositoryScanPlanPayload,
 } from "@/lib/admin-api";
+import {
+  getRepositoryEffectiveStatusClassName,
+  getRepositoryEffectiveStatusLabel,
+} from "@/lib/repository-effective-status";
 import { getRepositorySourceTypeLabelKey, isGitRepositorySource } from "@/lib/repository-source";
 import { fetchProcessingLogs, fetchRepoDoc, fetchRepoTree } from "@/lib/repository-api";
 import type { ProcessingLogResponse, RepoDocResponse, RepoTreeNode } from "@/types/repository";
@@ -1305,8 +1309,14 @@ export default function AdminRepositoryManagementPage() {
           <div className="space-y-3">
             <div className="flex items-center justify-between">
               <p className="text-sm font-semibold">{t("admin.repositories.management.summaryTitle")}</p>
-              <span className={`inline-flex rounded px-2 py-1 text-xs ${statusBadgeClass(repository.statusText)}`}>
-                {getLocalizedTaskStatus(repository.statusText)}
+              <span className={`inline-flex rounded px-2 py-1 text-xs ${
+                repository.effectiveStatus
+                  ? getRepositoryEffectiveStatusClassName(repository.effectiveStatus)
+                  : statusBadgeClass(repository.statusText)
+              }`}>
+                {repository.effectiveStatus
+                  ? getRepositoryEffectiveStatusLabel(repository.effectiveStatus)
+                  : getLocalizedTaskStatus(repository.statusText)}
               </span>
             </div>
             <div className="rounded-lg border bg-muted/30 p-3">

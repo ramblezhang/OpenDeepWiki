@@ -1,4 +1,10 @@
 import type { RepositorySourceTypeName, RepositorySourceTypeValue } from "@/lib/repository-source";
+import type {
+  RepositoryActiveOperation,
+  RepositoryBlockingFailure,
+  RepositoryEffectiveStatus,
+  RepositoryStatusCounts,
+} from "@/types/repository";
 import { getApiProxyUrl } from "./env";
 import { getToken } from "./auth-api";
 
@@ -234,6 +240,11 @@ export interface AdminRepository {
   generateSkill: boolean;
   status: number;
   statusText: string;
+  effectiveStatus?: RepositoryEffectiveStatus;
+  effectiveStatusReason?: string;
+  statusCounts?: RepositoryStatusCounts;
+  activeOperations?: RepositoryActiveOperation[];
+  blockingFailures?: RepositoryBlockingFailure[];
   scanDepthMode: "Auto" | "Manual";
   scanPlan?: AdminRepositoryScanPlan;
   starCount: number;
@@ -405,6 +416,11 @@ export interface AdminRepositoryManagement {
   repoName: string;
   status: number;
   statusText: string;
+  effectiveStatus?: RepositoryEffectiveStatus;
+  effectiveStatusReason?: string;
+  statusCounts?: RepositoryStatusCounts;
+  activeOperations?: RepositoryActiveOperation[];
+  blockingFailures?: RepositoryBlockingFailure[];
   branches: AdminRepositoryBranch[];
   recentIncrementalTasks: AdminIncrementalTask[];
   recentBranchGenerationTasks: AdminBranchGenerationTask[];

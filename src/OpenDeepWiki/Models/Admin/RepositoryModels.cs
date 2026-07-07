@@ -1,4 +1,5 @@
 using OpenDeepWiki.Entities;
+using OpenDeepWiki.Models;
 
 namespace OpenDeepWiki.Models.Admin;
 
@@ -37,6 +38,11 @@ public class AdminRepositoryDto
     public int ViewCount { get; set; }
     public int BranchGenerationActiveCount { get; set; }
     public int BranchGenerationFailedCount { get; set; }
+    public string EffectiveStatus { get; set; } = RepositoryEffectiveStatuses.Unknown;
+    public string EffectiveStatusReason { get; set; } = string.Empty;
+    public RepositoryStatusCountsDto StatusCounts { get; set; } = new();
+    public List<RepositoryActiveOperationDto> ActiveOperations { get; set; } = new();
+    public List<RepositoryBlockingFailureDto> BlockingFailures { get; set; } = new();
     public string? OwnerUserId { get; set; }
     public string? OwnerUserName { get; set; }
     public DateTime CreatedAt { get; set; }
@@ -117,6 +123,11 @@ public class AdminRepositoryManagementDto
     public string RepoName { get; set; } = string.Empty;
     public int Status { get; set; }
     public string StatusText { get; set; } = string.Empty;
+    public string EffectiveStatus { get; set; } = RepositoryEffectiveStatuses.Unknown;
+    public string EffectiveStatusReason { get; set; } = string.Empty;
+    public RepositoryStatusCountsDto StatusCounts { get; set; } = new();
+    public List<RepositoryActiveOperationDto> ActiveOperations { get; set; } = new();
+    public List<RepositoryBlockingFailureDto> BlockingFailures { get; set; } = new();
     public List<AdminRepositoryBranchDto> Branches { get; set; } = new();
     public List<AdminIncrementalTaskDto> RecentIncrementalTasks { get; set; } = new();
     public List<AdminBranchGenerationTaskDto> RecentBranchGenerationTasks { get; set; } = new();

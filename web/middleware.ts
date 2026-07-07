@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { applyRepoQueryHeaders } from './lib/repo-query-context';
 
 const supportedLocales = ['zh', 'en', 'ko', 'ja'];
 const defaultLocale = 'zh';
@@ -21,6 +22,7 @@ export function middleware(request: NextRequest) {
   // 将 locale 添加到请求头中，供 i18n 配置使用
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set('x-next-intl-locale', locale);
+  applyRepoQueryHeaders(requestHeaders, request.nextUrl.searchParams);
 
   const response = NextResponse.next({
     request: {

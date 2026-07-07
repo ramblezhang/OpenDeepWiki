@@ -50,7 +50,13 @@ import {
 } from "@/lib/admin-api";
 import { getRepositorySourceTypeLabelKey, isGitRepositorySource } from "@/lib/repository-source";
 import {
+  getRepositoryEffectiveStatusClassName,
+  getRepositoryEffectiveStatusLabel,
+} from "@/lib/repository-effective-status";
+import type { RepositoryStatus } from "@/types/repository";
+import {
   Loader2,
+  Clock,
   Search,
   Trash2,
   Eye,
@@ -82,6 +88,13 @@ const statusBarColors: Record<number, string> = {
   1: "bg-blue-500/90",
   2: "bg-emerald-500/90",
   3: "bg-red-500/90",
+};
+
+const rawStatusNames: Record<number, RepositoryStatus> = {
+  0: "Pending",
+  1: "Processing",
+  2: "Completed",
+  3: "Failed",
 };
 
 export default function AdminRepositoriesPage() {
@@ -266,9 +279,22 @@ export default function AdminRepositoriesPage() {
   const overview = useMemo(() => {
     const items = data?.items ?? [];
     const pageCount = items.length;
-    const completedCount = items.filter((item) => item.status === 2).length;
-    const processingCount = items.filter((item) => item.status === 1).length;
-    const failedCount = items.filter((item) => item.status === 3).length;
+    const completedCount = items.filter((item) =>
+      item.effectiveStatus ? item.effectiveStatus === "Completed" : item.status === 2
+    ).length;
+    const processingCount = items.filter((item) =>
+      item.effectiveStatus
+        ? item.effectiveStatus === "RepositoryFullProcessing" ||
+          item.effectiveStatus === "AllBranchesGenerating" ||
+          item.effectiveStatus === "PartialBranchesGenerating" ||
+          item.effectiveStatus === "IncrementalUpdating"
+        : item.status === 1
+    ).length;
+    const failedCount = items.filter((item) =>
+      item.effectiveStatus
+        ? item.effectiveStatus === "Failed" || item.effectiveStatus === "PartialFailed"
+        : item.status === 3
+    ).length;
     const publicCount = items.filter((item) => item.isPublic).length;
 
     return {
@@ -276,7 +302,13 @@ export default function AdminRepositoriesPage() {
       completedCount,
       processingCount,
       failedCount,
-      pendingCount: items.filter((item) => item.status === 0).length,
+      pendingCount: items.filter((item) =>
+        item.effectiveStatus
+          ? item.effectiveStatus === "RepositoryFullPending" ||
+            item.effectiveStatus === "AllBranchesQueued" ||
+            item.effectiveStatus === "PartialBranchesQueued"
+          : item.status === 0
+      ).length,
       completedRate: pageCount > 0 ? Math.round((completedCount / pageCount) * 100) : 0,
       publicRate: pageCount > 0 ? Math.round((publicCount / pageCount) * 100) : 0,
       selectedRate: pageCount > 0 ? Math.round((selectedIds.size / pageCount) * 100) : 0,
@@ -507,18 +539,32 @@ export default function AdminRepositoriesPage() {
                                 {t(`admin.repositories.${getRepositorySourceTypeLabelKey(repo.sourceType, repo.sourceTypeName)}`)}
                               </span>
                             </p>
-                            {(repo.branchGenerationActiveCount > 0 || repo.branchGenerationFailedCount > 0) && (
+                            {(repo.branchGenerationActiveCount > 0 ||
+                              repo.branchGenerationFailedCount > 0 ||
+                              ((repo.statusCounts?.incrementalPending ?? 0) + (repo.statusCounts?.incrementalProcessing ?? 0)) > 0) && (
                               <div className="mt-2 flex flex-wrap gap-1.5">
-                                {repo.branchGenerationActiveCount > 0 && (
+                                {(repo.statusCounts?.branchFullProcessing ?? 0) > 0 && (
                                   <Badge variant="secondary" className="gap-1">
                                     <Loader2 className="h-3 w-3 animate-spin" />
-                                    branch running {repo.branchGenerationActiveCount}
+                                    branch generating {repo.statusCounts?.branchFullProcessing ?? 0}
+                                  </Badge>
+                                )}
+                                {(repo.statusCounts?.branchFullPending ?? 0) > 0 && (
+                                  <Badge variant="secondary" className="gap-1">
+                                    <Clock className="h-3 w-3" />
+                                    branch queued {repo.statusCounts?.branchFullPending ?? 0}
                                   </Badge>
                                 )}
                                 {repo.branchGenerationFailedCount > 0 && (
                                   <Badge variant="destructive" className="gap-1">
                                     <AlertTriangle className="h-3 w-3" />
                                     branch failed {repo.branchGenerationFailedCount}
+                                  </Badge>
+                                )}
+                                {((repo.statusCounts?.incrementalPending ?? 0) + (repo.statusCounts?.incrementalProcessing ?? 0)) > 0 && (
+                                  <Badge variant="secondary" className="gap-1">
+                                    <RefreshCw className="h-3 w-3 animate-spin" />
+                                    incremental {(repo.statusCounts?.incrementalPending ?? 0) + (repo.statusCounts?.incrementalProcessing ?? 0)}
                                   </Badge>
                                 )}
                               </div>
@@ -545,9 +591,15 @@ export default function AdminRepositoriesPage() {
                                 disabled={statusUpdatingId === repo.id}
                                 className="h-8 w-[124px] justify-between px-2 transition-all duration-200"
                               >
-                                <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs ${statusColors[repo.status]}`}>
+                                <span className={`inline-flex items-center gap-1 rounded px-2 py-0.5 text-xs ${
+                                  repo.effectiveStatus
+                                    ? getRepositoryEffectiveStatusClassName(repo.effectiveStatus, rawStatusNames[repo.status])
+                                    : statusColors[repo.status]
+                                }`}>
                                   <span className="h-1.5 w-1.5 rounded-full bg-current/80" />
-                                  {statusLabels[repo.status]}
+                                  {repo.effectiveStatus
+                                    ? getRepositoryEffectiveStatusLabel(repo.effectiveStatus, rawStatusNames[repo.status])
+                                    : statusLabels[repo.status]}
                                 </span>
                                 {statusUpdatingId === repo.id ? (
                                   <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />

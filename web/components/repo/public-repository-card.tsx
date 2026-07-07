@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { useTranslations } from "@/hooks/use-translations";
 import { useAuth } from "@/contexts/auth-context";
 import type {
+  RepositoryEffectiveStatus,
   RepositoryItemResponse,
   RepositoryStatus,
 } from "@/types/repository";
@@ -27,6 +28,12 @@ import { cn } from "@/lib/utils";
 import { buildRepoBasePath } from "@/lib/repo-route";
 import { addBookmark, removeBookmark, getBookmarkStatus } from "@/lib/bookmark-api";
 import { addSubscription, removeSubscription, getSubscriptionStatus } from "@/lib/subscription-api";
+import {
+  getRepositoryEffectiveStatusClassName,
+  getRepositoryEffectiveStatusLabel,
+  isRepositoryEffectiveStatusActive,
+} from "@/lib/repository-effective-status";
+import { getRepositoryDisplayPath } from "./repository-explorer-tree";
 import { toast } from "sonner";
 
 const STATUS_CONFIG: Record<RepositoryStatus, {
@@ -56,25 +63,42 @@ const STATUS_CONFIG: Record<RepositoryStatus, {
   },
 };
 
-function StatusBadge({ status }: { status: RepositoryStatus }) {
+function StatusBadge({
+  status,
+  fallbackStatus,
+}: {
+  status?: RepositoryEffectiveStatus;
+  fallbackStatus: RepositoryStatus;
+}) {
   const t = useTranslations();
-  const config = STATUS_CONFIG[status];
-  const Icon = config.icon;
+  const isActive = isRepositoryEffectiveStatusActive(status);
+  const isQueued = status === "AllBranchesQueued" || status === "PartialBranchesQueued" || status === "RepositoryFullPending";
+  const fallbackConfig = STATUS_CONFIG[fallbackStatus];
+  const Icon = status === "Failed" || status === "PartialFailed"
+    ? XCircle
+    : isQueued
+      ? Clock
+      : isActive
+        ? Loader2
+        : fallbackConfig.icon;
+  const label = status
+    ? getRepositoryEffectiveStatusLabel(status, fallbackStatus)
+    : t(`home.repository.status.${fallbackConfig.labelKey}`);
 
   return (
     <span
       className={cn(
         "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs font-medium",
-        config.className
+        status ? getRepositoryEffectiveStatusClassName(status, fallbackStatus) : fallbackConfig.className
       )}
     >
       <Icon
         className={cn(
           "h-3.5 w-3.5 shrink-0",
-          status === "Processing" && "animate-spin"
+          isActive && "animate-spin"
         )}
       />
-      {t(`home.repository.status.${config.labelKey}`)}
+      {label}
     </span>
   );
 }
@@ -101,7 +125,7 @@ export function PublicRepositoryCard({
   const isTreeVariant = variant === "tree";
   const repositoryName = isTreeVariant
     ? getRepositoryLeafName(repository)
-    : `${repository.orgName}/${repository.repoName}`;
+    : getRepositoryDisplayPath(repository);
 
   const [isBookmarked, setIsBookmarked] = useState(false);
   const [isSubscribed, setIsSubscribed] = useState(false);
@@ -194,7 +218,7 @@ export function PublicRepositoryCard({
                 </h3>
               </div>
               <div className={cn(isTreeVariant && "flex justify-start")}>
-                <StatusBadge status={repository.statusName} />
+                <StatusBadge status={repository.effectiveStatus} fallbackStatus={repository.statusName} />
               </div>
             </div>
             <div className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)] items-center gap-2">

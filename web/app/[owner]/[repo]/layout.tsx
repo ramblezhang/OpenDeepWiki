@@ -1,10 +1,12 @@
 import React from "react";
 import type { Metadata } from "next";
+import { headers } from "next/headers";
 import { fetchRepoTree, fetchRepoBranches, checkGitHubRepo, fetchProcessingLogs } from "@/lib/repository-api";
 import { RepoShell } from "@/components/repo/repo-shell";
 import { RepositoryProcessingStatus } from "@/components/repo/repository-processing-status";
 import { RepositoryNotFound } from "@/components/repo/repository-not-found";
 import { decodeRouteSegment } from "@/lib/repo-route";
+import { getRepoQueryFromHeaders } from "@/lib/repo-query-context";
 import { indexableMetadata, noIndexMetadata, repoCanonicalPath, repoTitle, SITE_DESCRIPTION } from "@/lib/repo-seo";
 import RouteProviders from "@/app/route-providers";
 
@@ -19,9 +21,9 @@ interface RepoLayoutProps {
   }>;
 }
 
-async function getTreeData(owner: string, repo: string) {
+async function getTreeData(owner: string, repo: string, branch?: string, lang?: string) {
   try {
-    const tree = await fetchRepoTree(owner, repo);
+    const tree = await fetchRepoTree(owner, repo, branch, lang);
     return tree;
   } catch {
     return null;
@@ -65,7 +67,8 @@ export async function generateMetadata({ params }: Pick<RepoLayoutProps, "params
   const title = `${repoTitle(decodedOwner, decodedRepo)} Wiki`;
   const description = `AI-generated documentation and code knowledge base for ${repoTitle(decodedOwner, decodedRepo)}.`;
   const canonicalPath = repoCanonicalPath(decodedOwner, decodedRepo);
-  const tree = await getTreeData(decodedOwner, decodedRepo);
+  const { branch, lang } = getRepoQueryFromHeaders(await headers());
+  const tree = await getTreeData(decodedOwner, decodedRepo, branch, lang);
 
   if (!tree?.exists || tree.statusName !== "Completed" || tree.nodes.length === 0) {
     return noIndexMetadata(title, description || SITE_DESCRIPTION, canonicalPath);
@@ -82,8 +85,9 @@ export default async function RepoLayout({ children, params }: RepoLayoutProps) 
   const { owner, repo } = await params;
   const decodedOwner = decodeRouteSegment(owner);
   const decodedRepo = decodeRouteSegment(repo);
+  const { branch, lang } = getRepoQueryFromHeaders(await headers());
   
-  const tree = await getTreeData(decodedOwner, decodedRepo);
+  const tree = await getTreeData(decodedOwner, decodedRepo, branch, lang);
 
   let content: React.ReactNode;
 
@@ -95,6 +99,8 @@ export default async function RepoLayout({ children, params }: RepoLayoutProps) 
         <RepositoryProcessingStatus
           owner={decodedOwner}
           repo={decodedRepo}
+          branch={branch}
+          lang={lang}
           status={processingStatus}
         />
       );
@@ -109,7 +115,12 @@ export default async function RepoLayout({ children, params }: RepoLayoutProps) 
       <RepositoryProcessingStatus
         owner={decodedOwner}
         repo={decodedRepo}
+        branch={branch}
+        lang={lang}
         status={tree.statusName}
+        effectiveStatus={tree.effectiveStatus}
+        effectiveStatusReason={tree.effectiveStatusReason}
+        statusCounts={tree.statusCounts}
       />
     );
   }
@@ -119,7 +130,12 @@ export default async function RepoLayout({ children, params }: RepoLayoutProps) 
       <RepositoryProcessingStatus
         owner={decodedOwner}
         repo={decodedRepo}
+        branch={branch}
+        lang={lang}
         status="Completed"
+        effectiveStatus={tree.effectiveStatus}
+        effectiveStatusReason={tree.effectiveStatusReason}
+        statusCounts={tree.statusCounts}
       />
     );
   }

@@ -276,35 +276,16 @@ public class RepositoryService(
             .Take(pageSize)
             .ToListAsync();
 
-        var repositoryIds = repositories.Select(item => item.Id).ToArray();
-        var branchGenerationSummary = repositoryIds.Length == 0
-            ? new Dictionary<string, (int Active, int Failed)>()
-            : (await context.RepositoryBranches
-                .AsNoTracking()
-                .Where(branch => repositoryIds.Contains(branch.RepositoryId) &&
-                                 !branch.IsDeleted &&
-                                 branch.GenerationStatus != null)
-                .Select(branch => new
-                {
-                    branch.RepositoryId,
-                    branch.GenerationStatus
-                })
-                .ToListAsync())
-            .GroupBy(branch => branch.RepositoryId)
-            .ToDictionary(
-                group => group.Key,
-                group => (
-                    Active: group.Count(branch =>
-                        branch.GenerationStatus is BranchGenerationTaskStatus.Pending
-                            or BranchGenerationTaskStatus.Processing),
-                    Failed: group.Count(branch => branch.GenerationStatus == BranchGenerationTaskStatus.Failed)));
+        var effectiveStatusMap = await LoadEffectiveStatusesAsync(repositories);
 
         return new RepositoryListResponse
         {
             Total = total,
             Items = repositories.Select(r =>
             {
-                branchGenerationSummary.TryGetValue(r.Id, out var summary);
+                effectiveStatusMap.TryGetValue(r.Id, out var effectiveStatus);
+                effectiveStatus ??= RepositoryEffectiveStatusService.Build(r, [], [], []);
+
                 return new RepositoryItemResponse
                 {
                     Id = r.Id,
@@ -322,8 +303,14 @@ public class RepositoryService(
                     StarCount = r.StarCount,
                     ForkCount = r.ForkCount,
                     PrimaryLanguage = r.PrimaryLanguage,
-                    BranchGenerationActiveCount = summary.Active,
-                    BranchGenerationFailedCount = summary.Failed
+                    BranchGenerationActiveCount = effectiveStatus.StatusCounts.BranchFullPending +
+                                                  effectiveStatus.StatusCounts.BranchFullProcessing,
+                    BranchGenerationFailedCount = effectiveStatus.StatusCounts.FailedBranches,
+                    EffectiveStatus = effectiveStatus.EffectiveStatus,
+                    EffectiveStatusReason = effectiveStatus.EffectiveStatusReason,
+                    StatusCounts = effectiveStatus.StatusCounts,
+                    ActiveOperations = effectiveStatus.ActiveOperations,
+                    BlockingFailures = effectiveStatus.BlockingFailures
                 };
             }).ToList()
         };
@@ -754,6 +741,48 @@ public class RepositoryService(
     private static string NormalizeLocalDirectoryPath(string path)
     {
         return Path.GetFullPath(path.Trim());
+    }
+
+    private async Task<Dictionary<string, RepositoryEffectiveStatusDto>> LoadEffectiveStatusesAsync(IReadOnlyCollection<Repository> repositories)
+    {
+        var repositoryIds = repositories.Select(repository => repository.Id).Distinct().ToArray();
+        if (repositoryIds.Length == 0)
+        {
+            return new Dictionary<string, RepositoryEffectiveStatusDto>();
+        }
+
+        var branches = await context.RepositoryBranches
+            .AsNoTracking()
+            .Where(branch => repositoryIds.Contains(branch.RepositoryId) && !branch.IsDeleted)
+            .ToListAsync();
+
+        var activeBranchTasks = await context.BranchGenerationTasks
+            .AsNoTracking()
+            .Where(task => repositoryIds.Contains(task.RepositoryId) &&
+                           !task.IsDeleted &&
+                           (task.Status == BranchGenerationTaskStatus.Pending ||
+                            task.Status == BranchGenerationTaskStatus.Processing))
+            .ToListAsync();
+
+        var activeIncrementalTasks = await context.IncrementalUpdateTasks
+            .AsNoTracking()
+            .Where(task => repositoryIds.Contains(task.RepositoryId) &&
+                           !task.IsDeleted &&
+                           (task.Status == IncrementalUpdateStatus.Pending ||
+                            task.Status == IncrementalUpdateStatus.Processing))
+            .ToListAsync();
+
+        var branchGroups = branches.GroupBy(branch => branch.RepositoryId).ToDictionary(group => group.Key, group => group.ToList());
+        var branchTaskGroups = activeBranchTasks.GroupBy(task => task.RepositoryId).ToDictionary(group => group.Key, group => group.ToList());
+        var incrementalTaskGroups = activeIncrementalTasks.GroupBy(task => task.RepositoryId).ToDictionary(group => group.Key, group => group.ToList());
+
+        return repositories.ToDictionary(
+            repository => repository.Id,
+            repository => RepositoryEffectiveStatusService.Build(
+                repository,
+                branchGroups.GetValueOrDefault(repository.Id) ?? [],
+                branchTaskGroups.GetValueOrDefault(repository.Id) ?? [],
+                incrementalTaskGroups.GetValueOrDefault(repository.Id) ?? []));
     }
 
     private void EnsureLocalPathAllowed(string fullPath)

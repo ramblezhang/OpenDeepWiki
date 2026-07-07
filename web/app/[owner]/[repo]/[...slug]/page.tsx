@@ -5,7 +5,7 @@ import { extractHeadings } from "@/lib/markdown";
 import { MarkdownRenderer } from "@/components/repo/markdown-renderer";
 import { SourceFiles } from "@/components/repo/source-files";
 import { buildRepoDocPath, decodeRouteSegment } from "@/lib/repo-route";
-import type { RepoTreeNode } from "@/types/repository";
+import { resolveMissingDocRedirectSlug } from "@/lib/repo-doc-redirect";
 import {
   createMarkdownDescription,
   createTechArticleJsonLd,
@@ -43,47 +43,10 @@ async function getDocData(owner: string, repo: string, slug: string, branch?: st
   }
 }
 
-function findNodeBySlug(nodes: RepoTreeNode[], slug: string): RepoTreeNode | null {
-  for (const node of nodes) {
-    if (node.slug === slug) {
-      return node;
-    }
-
-    const match = findNodeBySlug(node.children ?? [], slug);
-    if (match) {
-      return match;
-    }
-  }
-
-  return null;
-}
-
-function findFirstLeafSlug(node: RepoTreeNode): string | null {
-  const children = node.children ?? [];
-  if (children.length === 0) {
-    return node.slug;
-  }
-
-  for (const child of children) {
-    const slug = findFirstLeafSlug(child);
-    if (slug) {
-      return slug;
-    }
-  }
-
-  return null;
-}
-
 async function getDirectoryRedirectSlug(owner: string, repo: string, slug: string, branch?: string, lang?: string) {
   try {
     const tree = await fetchRepoTree(owner, repo, branch, lang);
-    const node = findNodeBySlug(tree.nodes, slug);
-    if (!node || (node.children ?? []).length === 0) {
-      return null;
-    }
-
-    const leafSlug = findFirstLeafSlug(node);
-    return leafSlug && leafSlug !== slug ? leafSlug : null;
+    return resolveMissingDocRedirectSlug(tree.nodes, slug, tree.defaultSlug);
   } catch {
     return null;
   }

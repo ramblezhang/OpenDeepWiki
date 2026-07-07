@@ -86,7 +86,9 @@ public sealed class RepositoryBranchProcessor(
                 logger.LogWarning(
                     "No languages found for branch. BranchId: {BranchId}, Branch: {BranchName}",
                     branch.Id, branch.BranchName);
-                return workspace.CommitId;
+
+                throw new InvalidOperationException(
+                    $"Branch '{branch.BranchName}' has no configured languages. Add a BranchLanguage before generating wiki content.");
             }
 
             var isIncremental = !forceFullGeneration &&

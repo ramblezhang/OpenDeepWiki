@@ -142,38 +142,49 @@ public class RepositoryDocsService(
             };
         }
 
+        var effectiveStatus = await LoadEffectiveStatusAsync(repository);
+        RepositoryTreeResponse WithEffectiveStatus(RepositoryTreeResponse response)
+        {
+            response.EffectiveStatus = effectiveStatus.EffectiveStatus;
+            response.EffectiveStatusReason = effectiveStatus.EffectiveStatusReason;
+            response.StatusCounts = effectiveStatus.StatusCounts;
+            response.ActiveOperations = effectiveStatus.ActiveOperations;
+            response.BlockingFailures = effectiveStatus.BlockingFailures;
+            return response;
+        }
+
         // 仓库正在处理中或等待处理
         if (repository.Status == RepositoryStatus.Pending || repository.Status == RepositoryStatus.Processing)
         {
-            return new RepositoryTreeResponse
+            return WithEffectiveStatus(new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
                 Nodes = []
-            };
+            });
         }
 
         // 仓库处理完成或失败，获取文档目录
         var branchEntity = await GetBranchAsync(repository.Id, branch);
         if (branchEntity is null)
         {
-            return new RepositoryTreeResponse
+            return WithEffectiveStatus(new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
                 Exists = true,
                 Status = repository.Status,
                 Nodes = []
-            };
+            });
         }
 
         var language = await GetLanguageAsync(branchEntity.Id, lang);
         var graphifyState = await GetGraphifyStateAsync(branchEntity.Id);
         if (language is null)
         {
-            return new RepositoryTreeResponse
+            return WithEffectiveStatus(new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -184,7 +195,7 @@ public class RepositoryDocsService(
                 GraphifyStatus = graphifyState.Status,
                 GraphifyStatusName = graphifyState.StatusName,
                 Nodes = []
-            };
+            });
         }
 
         var catalogs = await context.DocCatalogs
@@ -196,7 +207,7 @@ public class RepositoryDocsService(
         if (catalogs.Count == 0)
         {
             // 仓库已完成但没有文档，可能是空仓库
-            return new RepositoryTreeResponse
+            return WithEffectiveStatus(new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -208,14 +219,14 @@ public class RepositoryDocsService(
                 GraphifyStatus = graphifyState.Status,
                 GraphifyStatusName = graphifyState.StatusName,
                 Nodes = []
-            };
+            });
         }
 
         // 构建树形结构
         var readyCatalogs = FilterToReadyWithAncestors(catalogs);
         if (readyCatalogs.Count == 0)
         {
-            return new RepositoryTreeResponse
+            return WithEffectiveStatus(new RepositoryTreeResponse
             {
                 Owner = repository.OrgName,
                 Repo = repository.RepoName,
@@ -227,7 +238,7 @@ public class RepositoryDocsService(
                 GraphifyStatus = graphifyState.Status,
                 GraphifyStatusName = graphifyState.StatusName,
                 Nodes = []
-            };
+            });
         }
 
         var catalogMap = readyCatalogs.ToDictionary(c => c.Id);
@@ -241,7 +252,7 @@ public class RepositoryDocsService(
         // 递归查找第一个有实际内容的文档
         var defaultSlug = FindFirstContentSlug(readyCatalogs, null) ?? string.Empty;
 
-        return new RepositoryTreeResponse
+        return WithEffectiveStatus(new RepositoryTreeResponse
         {
             Owner = repository.OrgName,
             Repo = repository.RepoName,
@@ -254,7 +265,7 @@ public class RepositoryDocsService(
             HasGraphifyArtifact = graphifyState.HasArtifact,
             GraphifyStatus = graphifyState.Status,
             GraphifyStatusName = graphifyState.StatusName
-        };
+        });
     }
 
     [HttpGet("/{owner}/{repo}/graphify")]
@@ -827,6 +838,32 @@ public class RepositoryDocsService(
         return string.IsNullOrEmpty(parentZipPath)
             ? entryName
             : $"{parentZipPath}/{entryName}";
+    }
+
+    private async Task<RepositoryEffectiveStatusDto> LoadEffectiveStatusAsync(Repository repository)
+    {
+        var branches = await context.RepositoryBranches
+            .AsNoTracking()
+            .Where(branch => branch.RepositoryId == repository.Id && !branch.IsDeleted)
+            .ToListAsync();
+
+        var activeBranchTasks = await context.BranchGenerationTasks
+            .AsNoTracking()
+            .Where(task => task.RepositoryId == repository.Id &&
+                           !task.IsDeleted &&
+                           (task.Status == BranchGenerationTaskStatus.Pending ||
+                            task.Status == BranchGenerationTaskStatus.Processing))
+            .ToListAsync();
+
+        var activeIncrementalTasks = await context.IncrementalUpdateTasks
+            .AsNoTracking()
+            .Where(task => task.RepositoryId == repository.Id &&
+                           !task.IsDeleted &&
+                           (task.Status == IncrementalUpdateStatus.Pending ||
+                            task.Status == IncrementalUpdateStatus.Processing))
+            .ToListAsync();
+
+        return RepositoryEffectiveStatusService.Build(repository, branches, activeBranchTasks, activeIncrementalTasks);
     }
 
     private static string SanitizeZipNameSegment(string? value)

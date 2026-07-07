@@ -251,9 +251,13 @@ export async function updateRepositoryVisibility(
 /**
  * Fetch repository status (client-side polling)
  */
-export async function fetchRepoStatus(owner: string, repo: string): Promise<RepoTreeResponse> {
+export async function fetchRepoStatus(owner: string, repo: string, branch?: string, lang?: string): Promise<RepoTreeResponse> {
+  const params = new URLSearchParams();
+  if (branch) params.set("branch", branch);
+  if (lang) params.set("lang", lang);
+  const query = params.toString();
   const url = buildApiUrl(
-    `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tree`,
+    `/api/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/tree${query ? `?${query}` : ""}`,
   );
 
   const response = await fetch(url, { cache: "no-store", headers: await getSSRAuthHeaders() });

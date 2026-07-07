@@ -6,19 +6,19 @@ import { Card } from "@/components/ui/card";
 import type { RepositoryItemResponse } from "@/types/repository";
 import { cn } from "@/lib/utils";
 import {
+  ROOT_PATH,
+  buildRepositoryTree,
+  getRepositoryFolderPath,
+  sortTreeNodes,
+  type TreeNode,
+} from "./repository-explorer-tree";
+import {
   ChevronDown,
   ChevronRight,
   Folder,
   FolderOpen,
   GitBranch,
 } from "lucide-react";
-
-type TreeNode = {
-  name: string;
-  path: string;
-  children: Map<string, TreeNode>;
-  repositoryCount: number;
-};
 
 interface RepositoryExplorerViewProps {
   repositories: RepositoryItemResponse[];
@@ -34,64 +34,6 @@ interface RepositoryExplorerViewProps {
   };
   className?: string;
   contentClassName?: string;
-}
-
-const ROOT_PATH = "";
-
-function splitRepositoryPath(repository: RepositoryItemResponse) {
-  return [
-    repository.orgName,
-    ...repository.repoName.split("/").filter(Boolean),
-  ].filter(Boolean);
-}
-
-function getRepositoryFolderPath(repository: RepositoryItemResponse) {
-  const segments = splitRepositoryPath(repository);
-  return segments.slice(0, -1).join("/");
-}
-
-function createNode(name: string, path: string): TreeNode {
-  return {
-    name,
-    path,
-    children: new Map(),
-    repositoryCount: 0,
-  };
-}
-
-function buildTree(repositories: RepositoryItemResponse[]) {
-  const root = createNode("Repositories", ROOT_PATH);
-  const folderPaths = new Set<string>();
-
-  for (const repository of repositories) {
-    const segments = splitRepositoryPath(repository);
-    const folderSegments = segments.slice(0, -1);
-    let current = root;
-
-    current.repositoryCount += 1;
-    folderSegments.forEach((segment, index) => {
-      const path = folderSegments.slice(0, index + 1).join("/");
-      let child = current.children.get(segment);
-
-      if (!child) {
-        child = createNode(segment, path);
-        current.children.set(segment, child);
-      }
-
-      child.repositoryCount += 1;
-      folderPaths.add(path);
-      current = child;
-    });
-  }
-
-  return {
-    root,
-    folderPaths: Array.from(folderPaths),
-  };
-}
-
-function sortNodes(nodes: Iterable<TreeNode>) {
-  return Array.from(nodes).sort((a, b) => a.name.localeCompare(b.name));
 }
 
 function TreeRow({
@@ -162,7 +104,7 @@ function TreeRow({
       </div>
       {hasChildren && isExpanded && (
         <div className="mt-1 space-y-1">
-          {sortNodes(node.children.values()).map((child) => (
+          {sortTreeNodes(node.children.values()).map((child) => (
             <TreeRow
               key={child.path}
               node={child}
@@ -189,7 +131,7 @@ export function RepositoryExplorerView({
   contentClassName,
 }: RepositoryExplorerViewProps) {
   const { root, folderPaths } = useMemo(
-    () => buildTree(repositories),
+    () => buildRepositoryTree(repositories),
     [repositories]
   );
   const [selectedPath, setSelectedPath] = useState(ROOT_PATH);
@@ -277,7 +219,7 @@ export function RepositoryExplorerView({
               {repositories.length}
             </span>
           </button>
-          {sortNodes(root.children.values()).map((node) => (
+          {sortTreeNodes(root.children.values()).map((node) => (
             <TreeRow
               key={node.path}
               node={node}
