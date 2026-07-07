@@ -29,9 +29,17 @@ interface HeaderProps {
   title: string;
   currentWeekday: string;
   searchBox?: HeaderSearchBoxProps;
+  showSidebarTrigger?: boolean;
+  showAuthControls?: boolean;
 }
 
-export function Header({ title, currentWeekday, searchBox }: HeaderProps) {
+export function Header({
+  title,
+  currentWeekday,
+  searchBox,
+  showSidebarTrigger = true,
+  showAuthControls = true,
+}: HeaderProps) {
   const router = useRouter();
   const t = useTranslations();
   const { user, isAuthenticated, isLoading, logout } = useAuth();
@@ -52,14 +60,18 @@ export function Header({ title, currentWeekday, searchBox }: HeaderProps) {
   };
 
   return (
-    <header className="sticky top-0 z-10 flex h-16 shrink-0 items-center justify-between gap-2 border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-2">
-        <SidebarTrigger className="-ml-1" />
-        <Separator orientation="vertical" className="mr-2 h-4" />
-        <h2 className="text-sm font-semibold">{title}</h2>
+    <header className="sticky top-0 z-10 flex h-16 min-w-0 shrink-0 items-center justify-between gap-2 border-b bg-background/95 px-3 backdrop-blur supports-[backdrop-filter]:bg-background/60 sm:px-4">
+      <div className="flex min-w-0 items-center gap-2">
+        {showSidebarTrigger && (
+          <>
+            <SidebarTrigger className="-ml-1" />
+            <Separator orientation="vertical" className="mr-2 h-4" />
+          </>
+        )}
+        <h2 className="truncate text-sm font-semibold">{title}</h2>
       </div>
 
-      <div className="flex items-center gap-4">
+      <div className="flex min-w-0 shrink-0 items-center gap-2 sm:gap-4">
         <span className="text-sm text-muted-foreground hidden md:inline-block">
           {currentWeekday}
         </span>
@@ -77,11 +89,11 @@ export function Header({ title, currentWeekday, searchBox }: HeaderProps) {
           <ThemeToggle />
         </div>
 
-        {isLoading ? (
+        {showAuthControls && isLoading ? (
           <Button variant="ghost" size="sm" disabled>
             <Loader2 className="h-4 w-4 animate-spin" />
           </Button>
-        ) : isAuthenticated && user ? (
+        ) : showAuthControls && isAuthenticated && user ? (
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" className="relative h-9 w-9 rounded-full">
@@ -126,11 +138,11 @@ export function Header({ title, currentWeekday, searchBox }: HeaderProps) {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-        ) : (
+        ) : showAuthControls ? (
           <Button size="sm" onClick={handleLogin}>
             {t("common.login")}
           </Button>
-        )}
+        ) : null}
       </div>
     </header>
   );

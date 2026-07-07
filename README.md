@@ -97,6 +97,7 @@ make up
 ### 4. Open the app
 
 - Web UI: [http://localhost:3000](http://localhost:3000)
+- Original / classic home page: [http://localhost:3000/-/classic-home](http://localhost:3000/-/classic-home)
 - Backend health: [http://localhost:8080/health](http://localhost:8080/health)
 
 On a fresh database, the seeded admin account is:

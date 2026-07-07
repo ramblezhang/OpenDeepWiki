@@ -97,6 +97,7 @@ make up
 ### 4. 访问系统
 
 - Web 界面：[http://localhost:3000](http://localhost:3000)
+- 原首页 / 旧首页入口：[http://localhost:3000/-/classic-home](http://localhost:3000/-/classic-home)
 - 后端健康检查：[http://localhost:8080/health](http://localhost:8080/health)
 
 全新数据库首次启动后会自动创建管理员账号：

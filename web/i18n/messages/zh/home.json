@@ -1,5 +1,19 @@
 {
   "title": "你想知道什么?",
+  "custom": {
+    "eyebrow": "团队代码知识库",
+    "title": "让代码库变成可搜索、可提问、可复用的知识资产",
+    "description": "提交仓库后自动生成 Wiki、目录和语义化文档，团队成员可以从同一个入口检索公开知识库、进入私有仓库或接入开发工具。",
+    "searchLabel": "搜索仓库",
+    "mcpAction": "接入 MCP",
+    "recommendAction": "查看推荐",
+    "privacyHint": "私有仓库仅对授权用户开放，隐藏入口不作为权限控制。",
+    "capabilities": {
+      "docs": "自动沉淀仓库结构、模块说明和文档入口，减少重复查找上下文。",
+      "assistant": "结合生成后的 Wiki 和开发工具，在编码流程中直接提问项目知识。",
+      "sources": "同时支持公开仓库、私有 Git 仓库、ZIP 压缩包和服务器目录。"
+    }
+  },
   "bookmarks": {
     "pageTitle": "我的收藏",
     "pageDescription": "快速访问您收藏的仓库",

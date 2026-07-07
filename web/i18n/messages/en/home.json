@@ -1,5 +1,19 @@
 {
   "title": "What do you want to know?",
+  "custom": {
+    "eyebrow": "Team code knowledge base",
+    "title": "Turn code repositories into searchable, reusable knowledge",
+    "description": "Submit a repository to generate Wiki pages, navigation, and semantic documentation so the team can search public knowledge, open private repositories, and connect developer tools from one place.",
+    "searchLabel": "Search repositories",
+    "mcpAction": "Connect MCP",
+    "recommendAction": "View recommendations",
+    "privacyHint": "Private repositories stay limited to authorized users. A hidden URL is not access control.",
+    "capabilities": {
+      "docs": "Capture repository structure, module notes, and document entry points to reduce repeated context hunting.",
+      "assistant": "Ask project questions directly in your coding workflow with generated Wiki context.",
+      "sources": "Supports public repositories, private Git repositories, ZIP archives, and server directories."
+    }
+  },
   "bookmarks": {
     "pageTitle": "Bookmarks",
     "pageDescription": "Your saved repositories for quick access",

@@ -24,7 +24,7 @@ export function HeaderSearchBox({
   return (
     <div
       className={cn(
-        "relative flex items-center transition-all duration-250 ease-in-out",
+        "relative hidden items-center transition-all duration-250 ease-in-out sm:flex",
         visible
           ? "opacity-100 translate-x-0 pointer-events-auto"
           : "opacity-0 translate-x-2 pointer-events-none",

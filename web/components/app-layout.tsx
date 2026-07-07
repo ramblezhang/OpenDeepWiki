@@ -17,9 +17,18 @@ interface AppLayoutProps {
   activeItem?: string;
   onItemClick?: (item: string) => void;
   searchBox?: HeaderSearchBoxProps;
+  hideSidebar?: boolean;
+  hideAuthControls?: boolean;
 }
 
-export function AppLayout({ children, activeItem, onItemClick, searchBox }: AppLayoutProps) {
+export function AppLayout({
+  children,
+  activeItem,
+  onItemClick,
+  searchBox,
+  hideSidebar = false,
+  hideAuthControls = false,
+}: AppLayoutProps) {
   const t = useTranslations();
   const defaultActiveItem = activeItem || t("sidebar.explore");
 
@@ -31,13 +40,17 @@ export function AppLayout({ children, activeItem, onItemClick, searchBox }: AppL
   const currentWeekday = t(`common.weekdays.${weekdayKey}`);
 
   return (
-    <SidebarProvider defaultOpen={true}>
-      <AppSidebar activeItem={defaultActiveItem} onItemClick={onItemClick} className="!flex" />
-      <SidebarInset>
+    <SidebarProvider defaultOpen={!hideSidebar}>
+      {!hideSidebar && (
+        <AppSidebar activeItem={defaultActiveItem} onItemClick={onItemClick} className="!flex" />
+      )}
+      <SidebarInset className="min-w-0 overflow-x-hidden">
         <Header
           title={defaultActiveItem}
           currentWeekday={currentWeekday}
           searchBox={searchBox}
+          showSidebarTrigger={!hideSidebar}
+          showAuthControls={!hideAuthControls}
         />
         {children}
       </SidebarInset>
