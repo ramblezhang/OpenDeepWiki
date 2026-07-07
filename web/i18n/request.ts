@@ -2,7 +2,7 @@ import { getRequestConfig } from 'next-intl/server';
 
 export const locales = ['zh', 'en', 'ko', 'ja'] as const;
 export type Locale = (typeof locales)[number];
-const defaultLocale: Locale = 'en';
+const defaultLocale: Locale = 'zh';
 
 export const localeNames: Record<Locale, string> = {
   zh: '简体中文',

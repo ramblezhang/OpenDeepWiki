@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 const supportedLocales = ['zh', 'en', 'ko', 'ja'];
-const defaultLocale = 'en';
+const defaultLocale = 'zh';
 
 export function middleware(request: NextRequest) {
   // 优先从 URL 查询参数获取语言设置（用于仓库文档页面）
@@ -10,7 +10,7 @@ export function middleware(request: NextRequest) {
   // 从 cookie 中获取语言设置
   const cookieLocale = request.cookies.get('NEXT_LOCALE')?.value;
   
-  // Priority: URL `lang` > cookie > default `en`
+  // Priority: URL `lang` > cookie > default `zh`
   let locale = defaultLocale;
   if (urlLang && supportedLocales.includes(urlLang)) {
     locale = urlLang;
