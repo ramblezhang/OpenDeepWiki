@@ -1,7 +1,7 @@
 {
   "assistant": {
-    "title": "OpenDeepWiki Agent",
-    "greeting": "👋 Hello! I'm OpenDeepWiki Agent",
+    "title": "Q&A Assistant",
+    "greeting": "👋 Hello! I'm the Q&A Assistant",
     "greetingSubtitle": "Feel free to ask me any questions about the documentation",
     "disabled": "Agent is disabled",
     "noModels": "No available models. Please contact the administrator to configure models",

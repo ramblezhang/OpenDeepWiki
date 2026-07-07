@@ -1,7 +1,7 @@
 {
   "assistant": {
-    "title": "OpenDeepWikiエージェント",
-    "greeting": "👋 こんにちは！OpenDeepWikiエージェントです",
+    "title": "Q&Aアシスタント",
+    "greeting": "👋 こんにちは！Q&Aアシスタントです",
     "greetingSubtitle": "ドキュメントについてのご質問があればお気軽にお聞きください",
     "disabled": "エージェント機能は無効です",
     "noModels": "利用可能なモデルがありません。管理者に連絡してモデルを設定してください",

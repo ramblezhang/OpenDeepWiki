@@ -1,7 +1,7 @@
 {
   "assistant": {
-    "title": "OpenDeepWiki 에이전트",
-    "greeting": "👋 안녕하세요! OpenDeepWiki 에이전트입니다",
+    "title": "Q&A 어시스턴트",
+    "greeting": "👋 안녕하세요! Q&A 어시스턴트입니다",
     "greetingSubtitle": "문서에 대한 질문이 있으시면 편하게 물어보세요",
     "disabled": "에이전트가 비활성화되었습니다",
     "noModels": "사용 가능한 모델이 없습니다. 관리자에게 연락하여 모델을 구성해주세요",
