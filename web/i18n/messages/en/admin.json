@@ -232,6 +232,7 @@
         "graphifyFailed": "Failed to generate Graphify artifacts",
         "triggerIncrementalSuccess": "Incremental update triggered (Task: {taskId})",
         "triggerIncrementalFailed": "Failed to trigger incremental update",
+        "localGitWorktreeDirty": "The local Git worktree has uncommitted changes. Commit, stash, or clean them, then retry.",
         "refreshTaskFailed": "Failed to refresh task status",
         "retryTaskSuccess": "Task retry initiated",
         "retryTaskFailed": "Failed to retry task"

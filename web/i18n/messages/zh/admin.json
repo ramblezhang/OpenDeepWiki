@@ -232,6 +232,7 @@
         "graphifyFailed": "生成 Graphify 产物失败",
         "triggerIncrementalSuccess": "增量更新已触发 (任务: {taskId})",
         "triggerIncrementalFailed": "触发增量更新失败",
+        "localGitWorktreeDirty": "本地 Git 工作区存在未提交变更，请 commit、stash 或 clean 后重试。",
         "refreshTaskFailed": "刷新任务状态失败",
         "retryTaskSuccess": "任务重试已发起",
         "retryTaskFailed": "重试任务失败"

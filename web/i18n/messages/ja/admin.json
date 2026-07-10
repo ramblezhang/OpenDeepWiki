@@ -192,6 +192,7 @@
         "graphifyFailed": "Graphify アーティファクトの生成に失敗しました",
         "triggerIncrementalSuccess": "増分更新を開始しました (タスク: {taskId})",
         "triggerIncrementalFailed": "増分更新の実行に失敗しました",
+        "localGitWorktreeDirty": "ローカル Git ワークツリーに未コミットの変更があります。commit、stash、または clean を実行してから再試行してください。",
         "refreshTaskFailed": "タスク状態の更新に失敗しました",
         "retryTaskSuccess": "タスクの再試行を開始しました",
         "retryTaskFailed": "タスクの再試行に失敗しました"

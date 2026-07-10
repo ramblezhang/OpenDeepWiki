@@ -59,6 +59,7 @@ import {
   triggerRepositoryIncrementalUpdate,
   updateRepositoryDocumentContent,
   getRepositoryScanPlan,
+  isLocalGitWorktreeDirtyError,
   updateRepositoryScanPlan,
   reevaluateRepositoryScanPlan,
   AdminRepositoryScanPlan,
@@ -1057,7 +1058,11 @@ export default function AdminRepositoryManagementPage() {
       }
     } catch (error) {
       console.error("Failed to trigger incremental update:", error);
-      toast.error(t("admin.repositories.management.toasts.triggerIncrementalFailed"));
+      toast.error(
+        isLocalGitWorktreeDirtyError(error)
+          ? t("admin.repositories.management.toasts.localGitWorktreeDirty")
+          : t("admin.repositories.management.toasts.triggerIncrementalFailed")
+      );
     } finally {
       setTriggeringIncremental(false);
     }

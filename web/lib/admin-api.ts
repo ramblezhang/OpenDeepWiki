@@ -7,6 +7,7 @@ import type {
 } from "@/types/repository";
 import { getApiProxyUrl } from "./env";
 import { getToken } from "./auth-api";
+import { ApiError, api } from "./api-client";
 
 function buildApiUrl(path: string) {
   const baseUrl = getApiProxyUrl();
@@ -639,12 +640,28 @@ export interface IncrementalUpdateRetryResult {
   message: string;
 }
 
+interface IncrementalUpdateErrorResponse {
+  success: false;
+  errorCode?: string;
+  error?: string;
+  details?: string;
+}
+
+export function isLocalGitWorktreeDirtyError(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.status !== 409 || !error.data || typeof error.data !== "object") {
+    return false;
+  }
+
+  return (error.data as Partial<IncrementalUpdateErrorResponse>).errorCode === "LOCAL_GIT_WORKTREE_DIRTY";
+}
+
 export async function triggerRepositoryIncrementalUpdate(
   repositoryId: string,
   branchId: string
 ): Promise<IncrementalUpdateTriggerResult> {
-  const url = buildApiUrl(`/api/v1/repositories/${repositoryId}/branches/${branchId}/incremental-update`);
-  return fetchWithAuth(url, { method: "POST" });
+  return api.post<IncrementalUpdateTriggerResult>(
+    `/api/v1/repositories/${repositoryId}/branches/${branchId}/incremental-update`
+  );
 }
 
 export async function getIncrementalUpdateTask(
