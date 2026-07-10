@@ -6,7 +6,8 @@ namespace OpenDeepWiki.Entities;
 public enum RepositoryGenerationLockOwnerType
 {
     Repository = 0,
-    BranchTask = 1
+    BranchTask = 1,
+    IncrementalTask = 2
 }
 
 public enum RepositoryGenerationLockScope

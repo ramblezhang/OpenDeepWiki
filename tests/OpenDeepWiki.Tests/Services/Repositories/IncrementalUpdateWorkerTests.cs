@@ -1,5 +1,6 @@
 using System.Reflection;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -84,6 +85,13 @@ public class IncrementalUpdateWorkerTests
         analyzer
             .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
             .ReturnsAsync(GitCommitA);
+        analyzer
+            .Setup(x => x.CanNormalizeLocalGitSnapshotAsync(
+                repository,
+                SnapshotHash,
+                GitCommitA,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(true);
 
         var worker = CreateWorker();
 
@@ -94,6 +102,210 @@ public class IncrementalUpdateWorkerTests
         Assert.Equal(GitCommitA, updatedBranch.LastCommitId);
         Assert.Equal(originalLastProcessedAt, updatedBranch.LastProcessedAt);
         analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task CheckScheduledUpdatesAsync_WhenLocalGitSnapshotDoesNotMatchSource_DoesNotNormalizeBaseline()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            updateIntervalMinutes: 60,
+            lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath("/tmp/dirty-source-repo"));
+        var branch = SeedBranch(context, repository.Id, "main", SnapshotHash);
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(GitCommitA);
+        analyzer
+            .Setup(x => x.CanNormalizeLocalGitSnapshotAsync(
+                repository,
+                SnapshotHash,
+                GitCommitA,
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(false);
+
+        await InvokeCheckScheduledUpdatesAsync(
+            CreateWorker(),
+            context,
+            Mock.Of<IGitPlatformService>(),
+            analyzer.Object);
+
+        var task = await context.IncrementalUpdateTasks.SingleAsync();
+        Assert.Equal(IncrementalUpdateStatus.Pending, task.Status);
+        Assert.Equal(SnapshotHash, task.PreviousCommitId);
+        Assert.Equal(GitCommitA, task.TargetCommitId);
+        Assert.Equal(SnapshotHash, branch.LastCommitId);
+        analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task RecoverStaleTasksAsync_WhenProcessingTaskHasNoLease_CancelsWithoutDeletingDocuments()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, 60, DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", GitCommitA);
+        var branchLanguageId = Guid.NewGuid().ToString();
+        var docFileId = Guid.NewGuid().ToString();
+        context.BranchLanguages.Add(new BranchLanguage
+        {
+            Id = branchLanguageId,
+            RepositoryBranchId = branch.Id,
+            LanguageCode = "zh",
+            IsDefault = true
+        });
+        context.DocFiles.Add(new DocFile
+        {
+            Id = docFileId,
+            BranchLanguageId = branchLanguageId,
+            Content = "# Existing wiki"
+        });
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = branchLanguageId,
+            Title = "Existing wiki",
+            Path = "existing-wiki",
+            DocFileId = docFileId
+        });
+        var task = SeedProcessingTask(context, repository.Id, branch.Id, DateTime.UtcNow.AddHours(-2));
+        await context.SaveChangesAsync();
+
+        await InvokeRecoverStaleTasksAsync(CreateWorker(), context);
+
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, task.Status);
+        Assert.Contains("no active generation lease", task.ErrorMessage);
+        Assert.Single(await context.DocFiles.ToListAsync());
+        Assert.Single(await context.DocCatalogs.ToListAsync());
+        Assert.Equal(GitCommitA, branch.LastCommitId);
+    }
+
+    [Fact]
+    public async Task RecoverStaleTasksAsync_WhenLongRunningTaskHasRecentHeartbeat_DoesNotReleaseLease()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, 60, DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", GitCommitA);
+        var task = SeedProcessingTask(context, repository.Id, branch.Id, DateTime.UtcNow.AddHours(-2));
+        context.RepositoryGenerationLocks.Add(new RepositoryGenerationLock
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            OwnerType = RepositoryGenerationLockOwnerType.IncrementalTask,
+            OwnerId = task.Id,
+            Scope = RepositoryGenerationLockScope.Branch,
+            AcquiredAt = DateTime.UtcNow.AddHours(-2),
+            UpdatedAt = DateTime.UtcNow.AddMinutes(-1)
+        });
+        await context.SaveChangesAsync();
+
+        await InvokeRecoverStaleTasksAsync(CreateWorker(), context);
+
+        Assert.Equal(IncrementalUpdateStatus.Processing, task.Status);
+        Assert.Single(await context.RepositoryGenerationLocks.ToListAsync());
+    }
+
+    [Fact]
+    public async Task ProcessSingleTaskAsync_WhenTaskRunsLongerThanItsRecordedAge_HeartbeatPreventsRecovery()
+    {
+        var databaseRoot = new InMemoryDatabaseRoot();
+        var options = new DbContextOptionsBuilder<TestDbContext>()
+            .UseInMemoryDatabase(Guid.NewGuid().ToString(), databaseRoot)
+            .Options;
+        await using var setupContext = new TestDbContext(options);
+        var repository = SeedRepository(setupContext, 60, DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(setupContext, repository.Id, "main", GitCommitA);
+        var task = new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            Status = IncrementalUpdateStatus.Pending,
+            CreatedAt = DateTime.UtcNow
+        };
+        setupContext.IncrementalUpdateTasks.Add(task);
+        await setupContext.SaveChangesAsync();
+
+        var services = new ServiceCollection();
+        services.AddScoped<IContext>(_ => new TestDbContext(options));
+        services.AddScoped<IRepositoryGenerationLockService, RepositoryGenerationLockService>();
+        await using var provider = services.BuildServiceProvider();
+        var worker = new IncrementalUpdateWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<IncrementalUpdateWorker>.Instance,
+            Options.Create(new IncrementalUpdateOptions
+            {
+                Enabled = true,
+                LeaseHeartbeatIntervalSeconds = 1,
+                StaleTaskTimeoutMinutes = 1
+            }));
+        var updateService = new Mock<IIncrementalUpdateService>(MockBehavior.Strict);
+        updateService
+            .Setup(service => service.ProcessIncrementalUpdateAsync(
+                repository.Id,
+                branch.Id,
+                It.IsAny<CancellationToken>()))
+            .Returns(async () =>
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(1200));
+                await using var recoveryContext = new TestDbContext(options);
+                var persistedTask = await recoveryContext.IncrementalUpdateTasks.SingleAsync(item => item.Id == task.Id);
+                persistedTask.StartedAt = DateTime.UtcNow.AddHours(-2);
+                persistedTask.UpdatedAt = DateTime.UtcNow.AddHours(-2);
+                await recoveryContext.SaveChangesAsync();
+
+                await InvokeRecoverStaleTasksAsync(worker, recoveryContext);
+
+                Assert.Equal(IncrementalUpdateStatus.Processing, persistedTask.Status);
+                Assert.Single(await recoveryContext.RepositoryGenerationLocks.ToListAsync());
+                return new IncrementalUpdateResult
+                {
+                    Success = true,
+                    PreviousCommitId = GitCommitA,
+                    CurrentCommitId = GitCommitA
+                };
+            });
+
+        await InvokeProcessSingleTaskAsync(
+            worker,
+            setupContext,
+            updateService.Object,
+            new RepositoryGenerationLockService(setupContext),
+            task);
+
+        Assert.Equal(IncrementalUpdateStatus.Completed, task.Status);
+        await using var verificationContext = new TestDbContext(options);
+        Assert.Empty(await verificationContext.RepositoryGenerationLocks.ToListAsync());
+        updateService.VerifyAll();
+    }
+
+    [Fact]
+    public async Task RecoverStaleTasksAsync_WhenLeaseHeartbeatExpires_CancelsAndReleasesLease()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, 60, DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", GitCommitA);
+        var task = SeedProcessingTask(context, repository.Id, branch.Id, DateTime.UtcNow.AddHours(-2));
+        context.RepositoryGenerationLocks.Add(new RepositoryGenerationLock
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            OwnerType = RepositoryGenerationLockOwnerType.IncrementalTask,
+            OwnerId = task.Id,
+            Scope = RepositoryGenerationLockScope.Branch,
+            AcquiredAt = DateTime.UtcNow.AddHours(-2),
+            UpdatedAt = DateTime.UtcNow.AddHours(-1)
+        });
+        await context.SaveChangesAsync();
+
+        await InvokeRecoverStaleTasksAsync(CreateWorker(), context);
+
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, task.Status);
+        Assert.Contains("generation lease expired", task.ErrorMessage);
+        Assert.Empty(await context.RepositoryGenerationLocks.ToListAsync());
     }
 
     [Fact]
@@ -320,6 +532,57 @@ public class IncrementalUpdateWorkerTests
         var task = (Task?)method!.Invoke(worker, [context, gitPlatformService, analyzer, CancellationToken.None]);
         Assert.NotNull(task);
         await task!;
+    }
+
+    private static async Task InvokeRecoverStaleTasksAsync(
+        IncrementalUpdateWorker worker,
+        TestDbContext context)
+    {
+        var method = typeof(IncrementalUpdateWorker).GetMethod(
+            "RecoverStaleTasksAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var invocation = (Task?)method!.Invoke(worker, [context, CancellationToken.None]);
+        Assert.NotNull(invocation);
+        await invocation!;
+    }
+
+    private static async Task InvokeProcessSingleTaskAsync(
+        IncrementalUpdateWorker worker,
+        TestDbContext context,
+        IIncrementalUpdateService updateService,
+        IRepositoryGenerationLockService lockService,
+        IncrementalUpdateTask task)
+    {
+        var method = typeof(IncrementalUpdateWorker).GetMethod(
+            "ProcessSingleTaskAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var invocation = (Task?)method!.Invoke(
+            worker,
+            [context, updateService, lockService, task, CancellationToken.None]);
+        Assert.NotNull(invocation);
+        await invocation!;
+    }
+
+    private static IncrementalUpdateTask SeedProcessingTask(
+        TestDbContext context,
+        string repositoryId,
+        string branchId,
+        DateTime updatedAt)
+    {
+        var task = new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repositoryId,
+            BranchId = branchId,
+            Status = IncrementalUpdateStatus.Processing,
+            StartedAt = updatedAt,
+            CreatedAt = updatedAt,
+            UpdatedAt = updatedAt
+        };
+        context.IncrementalUpdateTasks.Add(task);
+        return task;
     }
 
     private static TestDbContext CreateContext()

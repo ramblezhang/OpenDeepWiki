@@ -359,6 +359,10 @@ public abstract class MasterDbContext : DbContext, IContext
             .HasIndex(l => l.RepositoryId)
             .IsUnique();
 
+        modelBuilder.Entity<RepositoryGenerationLock>()
+            .Property(l => l.UpdatedAt)
+            .IsConcurrencyToken();
+
         // GraphifyArtifact 仓库分支唯一索引（每个分支保留一个最新图谱）
         modelBuilder.Entity<GraphifyArtifact>()
             .HasIndex(a => a.RepositoryBranchId)

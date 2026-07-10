@@ -22,6 +22,16 @@ public interface IRepositoryAnalyzer
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Returns whether a local-directory Git source still matches a previously persisted
+    /// directory snapshot and is checked out cleanly at the expected commit.
+    /// </summary>
+    Task<bool> CanNormalizeLocalGitSnapshotAsync(
+        Repository repository,
+        string expectedSnapshotId,
+        string expectedCommitId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Clones or updates a repository to a local working directory.
     /// </summary>
     /// <param name="repository">The repository entity to process.</param>

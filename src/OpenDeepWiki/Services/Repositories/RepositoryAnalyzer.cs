@@ -136,6 +136,65 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     }
 
     /// <inheritdoc />
+    public async Task<bool> CanNormalizeLocalGitSnapshotAsync(
+        Entities.Repository repository,
+        string expectedSnapshotId,
+        string expectedCommitId,
+        CancellationToken cancellationToken = default)
+    {
+        var sourceInfo = RepositorySource.Parse(repository.GitUrl);
+        if (sourceInfo.SourceType != RepositorySourceType.LocalDirectory ||
+            !TryResolveLocalGitSource(sourceInfo.Location, out var localGitSource, out _))
+        {
+            return false;
+        }
+
+        if (!string.Equals(
+                ComputeDirectorySnapshotId(localGitSource.RepositoryPath),
+                expectedSnapshotId,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (localGitSource.AccessMode == LocalGitAccessMode.LibGit2)
+        {
+            return await Task.Run(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                using var localRepository = new GitRepository(localGitSource.RepositoryPath);
+                return string.Equals(localRepository.Head.Tip?.Sha, expectedCommitId, StringComparison.Ordinal) &&
+                       !localRepository.RetrieveStatus(new StatusOptions
+                       {
+                           IncludeUntracked = true,
+                           RecurseUntrackedDirs = true
+                       }).IsDirty;
+            }, cancellationToken);
+        }
+
+        var safeDirectories = BuildGitCliSafeDirectories(localGitSource.RepositoryPath);
+        var headResult = await RunGitCliAsync(
+            localGitSource.RepositoryPath,
+            ["rev-parse", "HEAD"],
+            cancellationToken,
+            throwOnError: false,
+            safeDirectories: safeDirectories);
+        if (headResult.ExitCode != 0 ||
+            !string.Equals(headResult.Output.Trim(), expectedCommitId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var statusResult = await RunGitCliAsync(
+            localGitSource.RepositoryPath,
+            ["status", "--porcelain=v1", "--untracked-files=all"],
+            cancellationToken,
+            throwOnError: false,
+            safeDirectories: safeDirectories);
+        return statusResult.ExitCode == 0 && string.IsNullOrWhiteSpace(statusResult.Output);
+    }
+
+    /// <inheritdoc />
     public async Task<RepositoryWorkspace> PrepareWorkspaceAsync(
         Entities.Repository repository,
         string branchName,

@@ -211,6 +211,40 @@ public class RepositoryAnalyzerSourceTests
     }
 
     [Fact]
+    public async Task CanNormalizeLocalGitSnapshotAsync_WhenTrackedFileIsDirty_ReturnsFalse()
+    {
+        var repositoriesRoot = CreateTempDirectory();
+        var sourceRoot = CreateTempDirectory();
+        var (_, expectedCommit) = CreateGitRepositoryWithBranches(sourceRoot, "branch-a", "branch-b");
+        var analyzer = CreateAnalyzer(repositoriesRoot);
+        var repository = CreateLocalSourceRepository(sourceRoot);
+        var snapshotId = ComputeDirectorySnapshotId(sourceRoot);
+
+        Assert.True(await analyzer.CanNormalizeLocalGitSnapshotAsync(repository, snapshotId, expectedCommit));
+
+        File.WriteAllText(Path.Combine(sourceRoot, "branch.txt"), "dirty working tree content");
+
+        Assert.False(await analyzer.CanNormalizeLocalGitSnapshotAsync(repository, snapshotId, expectedCommit));
+    }
+
+    [Fact]
+    public async Task CanNormalizeLocalGitSnapshotAsync_WhenUntrackedFileExists_ReturnsFalse()
+    {
+        var repositoriesRoot = CreateTempDirectory();
+        var sourceRoot = CreateTempDirectory();
+        var (_, expectedCommit) = CreateGitRepositoryWithBranches(sourceRoot, "branch-a", "branch-b");
+        var analyzer = CreateAnalyzer(repositoriesRoot);
+        var repository = CreateLocalSourceRepository(sourceRoot);
+        var snapshotId = ComputeDirectorySnapshotId(sourceRoot);
+
+        Assert.True(await analyzer.CanNormalizeLocalGitSnapshotAsync(repository, snapshotId, expectedCommit));
+
+        File.WriteAllText(Path.Combine(sourceRoot, "untracked.txt"), "must not be swallowed");
+
+        Assert.False(await analyzer.CanNormalizeLocalGitSnapshotAsync(repository, snapshotId, expectedCommit));
+    }
+
+    [Fact]
     public async Task PrepareWorkspaceAsync_WhenWorkspaceIsPlainDirectoryInsideParentGitRepo_ReclonesTargetBranch()
     {
         var parentRoot = CreateTempDirectory();
@@ -587,6 +621,15 @@ public class RepositoryAnalyzerSourceTests
         var path = Path.Combine(Path.GetTempPath(), "OpenDeepWiki.Tests", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(path);
         return path;
+    }
+
+    private static string ComputeDirectorySnapshotId(string path)
+    {
+        var method = typeof(RepositoryAnalyzer).GetMethod(
+            "ComputeDirectorySnapshotId",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        return Assert.IsType<string>(method!.Invoke(null, [path]));
     }
 
     private static void CreateArchive(string archivePath, params (string path, string content)[] entries)

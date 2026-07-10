@@ -71,6 +71,9 @@ public class IncrementalUpdateWorker : BackgroundService
         var updateService = scope.ServiceProvider.GetRequiredService<IIncrementalUpdateService>();
         var gitPlatformService = scope.ServiceProvider.GetRequiredService<IGitPlatformService>();
         var repositoryAnalyzer = scope.ServiceProvider.GetRequiredService<IRepositoryAnalyzer>();
+        var generationLockService = scope.ServiceProvider.GetRequiredService<IRepositoryGenerationLockService>();
+
+        await RecoverStaleTasksAsync(context, stoppingToken);
 
         var pendingTasks = await GetPendingTasksAsync(context, stoppingToken);
 
@@ -82,7 +85,8 @@ public class IncrementalUpdateWorker : BackgroundService
                 break;
             }
 
-            await ProcessSingleTaskAsync(context, updateService, task, stoppingToken);
+            await ProcessSingleTaskAsync(
+                context, updateService, generationLockService, task, stoppingToken);
         }
 
         await CheckScheduledUpdatesAsync(context, gitPlatformService, repositoryAnalyzer, stoppingToken);
@@ -102,6 +106,7 @@ public class IncrementalUpdateWorker : BackgroundService
     private async Task ProcessSingleTaskAsync(
         IContext context,
         IIncrementalUpdateService updateService,
+        IRepositoryGenerationLockService generationLockService,
         IncrementalUpdateTask task,
         CancellationToken stoppingToken)
     {
@@ -109,13 +114,47 @@ public class IncrementalUpdateWorker : BackgroundService
             "Processing task. TaskId: {TaskId}, RepositoryId: {RepositoryId}, BranchId: {BranchId}, Priority: {Priority}",
             task.Id, task.RepositoryId, task.BranchId, task.Priority);
 
+        var leaseMonitor = new IncrementalLeaseMonitor();
+        using var processingCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+        Task? heartbeatTask = null;
+
         try
         {
+            var lockAcquired = await generationLockService.TryAcquireAsync(
+                context,
+                task.RepositoryId,
+                RepositoryGenerationLockOwnerType.IncrementalTask,
+                task.Id,
+                RepositoryGenerationLockScope.Branch,
+                stoppingToken);
+            if (!lockAcquired)
+            {
+                _logger.LogDebug(
+                    "Incremental task is blocked by an active generation lock. TaskId: {TaskId}, RepositoryId: {RepositoryId}",
+                    task.Id,
+                    task.RepositoryId);
+                return;
+            }
+
             await UpdateTaskStatusAsync(
                 context, task, IncrementalUpdateStatus.Processing, null, stoppingToken);
+            heartbeatTask = RunLeaseHeartbeatAsync(
+                task,
+                leaseMonitor,
+                processingCancellation,
+                processingCancellation.Token);
 
             var result = await updateService.ProcessIncrementalUpdateAsync(
-                task.RepositoryId, task.BranchId, stoppingToken);
+                task.RepositoryId, task.BranchId, processingCancellation.Token);
+
+            if (leaseMonitor.LeaseLost)
+            {
+                _logger.LogWarning(
+                    "Incremental processing stopped after lease loss. TaskId: {TaskId}, RepositoryId: {RepositoryId}",
+                    task.Id,
+                    task.RepositoryId);
+                return;
+            }
 
             if (result.Success)
             {
@@ -150,6 +189,177 @@ public class IncrementalUpdateWorker : BackgroundService
             _logger.LogError(ex,
                 "Task processing failed with exception. TaskId: {TaskId}",
                 task.Id);
+        }
+        finally
+        {
+            processingCancellation.Cancel();
+            if (heartbeatTask is not null)
+            {
+                await AwaitHeartbeatShutdownAsync(heartbeatTask);
+            }
+
+            await ReleaseIncrementalLeaseAsync(task, CancellationToken.None);
+        }
+    }
+
+    private async Task RunLeaseHeartbeatAsync(
+        IncrementalUpdateTask task,
+        IncrementalLeaseMonitor leaseMonitor,
+        CancellationTokenSource processingCancellation,
+        CancellationToken cancellationToken)
+    {
+        var configuredInterval = TimeSpan.FromSeconds(Math.Max(1, _options.LeaseHeartbeatIntervalSeconds));
+        var leaseTimeout = TimeSpan.FromMinutes(Math.Max(1, _options.StaleTaskTimeoutMinutes));
+        var interval = configuredInterval < leaseTimeout
+            ? configuredInterval
+            : TimeSpan.FromTicks(Math.Max(1, leaseTimeout.Ticks / 3));
+
+        try
+        {
+            while (!cancellationToken.IsCancellationRequested)
+            {
+                await Task.Delay(interval, cancellationToken);
+                using var scope = _scopeFactory.CreateScope();
+                var heartbeatContext = scope.ServiceProvider.GetRequiredService<IContext>();
+                var generationLock = await heartbeatContext.RepositoryGenerationLocks
+                    .FirstOrDefaultAsync(item =>
+                        !item.IsDeleted &&
+                        item.RepositoryId == task.RepositoryId &&
+                        item.OwnerType == RepositoryGenerationLockOwnerType.IncrementalTask &&
+                        item.OwnerId == task.Id,
+                        cancellationToken);
+                var persistedTask = await heartbeatContext.IncrementalUpdateTasks
+                    .FirstOrDefaultAsync(item =>
+                        !item.IsDeleted &&
+                        item.Id == task.Id &&
+                        item.Status == IncrementalUpdateStatus.Processing,
+                        cancellationToken);
+
+                if (generationLock is null || persistedTask is null)
+                {
+                    leaseMonitor.MarkLost();
+                    processingCancellation.Cancel();
+                    return;
+                }
+
+                var now = DateTime.UtcNow;
+                generationLock.UpdatedAt = now;
+                persistedTask.UpdatedAt = now;
+                await heartbeatContext.SaveChangesAsync(cancellationToken);
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (DbUpdateConcurrencyException ex)
+        {
+            leaseMonitor.MarkLost();
+            processingCancellation.Cancel();
+            _logger.LogWarning(ex,
+                "Incremental lease heartbeat lost a recovery race. TaskId: {TaskId}, RepositoryId: {RepositoryId}",
+                task.Id,
+                task.RepositoryId);
+        }
+        catch (Exception ex)
+        {
+            leaseMonitor.MarkLost();
+            processingCancellation.Cancel();
+            _logger.LogError(ex,
+                "Incremental lease heartbeat failed. TaskId: {TaskId}, RepositoryId: {RepositoryId}",
+                task.Id,
+                task.RepositoryId);
+        }
+    }
+
+    private static async Task AwaitHeartbeatShutdownAsync(Task heartbeatTask)
+    {
+        try
+        {
+            await heartbeatTask;
+        }
+        catch (OperationCanceledException)
+        {
+        }
+    }
+
+    private async Task ReleaseIncrementalLeaseAsync(
+        IncrementalUpdateTask task,
+        CancellationToken cancellationToken)
+    {
+        using var scope = _scopeFactory.CreateScope();
+        var releaseContext = scope.ServiceProvider.GetRequiredService<IContext>();
+        var releaseService = scope.ServiceProvider.GetRequiredService<IRepositoryGenerationLockService>();
+        await releaseService.ReleaseAsync(
+            releaseContext,
+            task.RepositoryId,
+            RepositoryGenerationLockOwnerType.IncrementalTask,
+            task.Id,
+            cancellationToken);
+    }
+
+    private async Task RecoverStaleTasksAsync(IContext context, CancellationToken stoppingToken)
+    {
+        var now = DateTime.UtcNow;
+        var leaseCutoff = now.AddMinutes(-Math.Max(1, _options.StaleTaskTimeoutMinutes));
+        var processingTasks = await context.IncrementalUpdateTasks
+            .Where(task => !task.IsDeleted && task.Status == IncrementalUpdateStatus.Processing)
+            .ToListAsync(stoppingToken);
+
+        foreach (var task in processingTasks)
+        {
+            var generationLock = await context.RepositoryGenerationLocks
+                .FirstOrDefaultAsync(item =>
+                    !item.IsDeleted &&
+                    item.RepositoryId == task.RepositoryId &&
+                    item.OwnerType == RepositoryGenerationLockOwnerType.IncrementalTask &&
+                    item.OwnerId == task.Id,
+                    stoppingToken);
+            var leaseHeartbeatAt = generationLock?.UpdatedAt ?? generationLock?.AcquiredAt;
+            if (generationLock is not null && leaseHeartbeatAt > leaseCutoff)
+            {
+                continue;
+            }
+
+            var originalStatus = task.Status;
+            var originalUpdatedAt = task.UpdatedAt;
+            task.Status = IncrementalUpdateStatus.Cancelled;
+            task.CompletedAt = now;
+            task.UpdatedAt = now;
+            task.ErrorMessage = generationLock is null
+                ? "Recovered stale incremental task: processing state had no active generation lease."
+                : $"Recovered stale incremental task: generation lease expired before {leaseCutoff:O}.";
+
+            if (generationLock is not null)
+            {
+                context.RepositoryGenerationLocks.Remove(generationLock);
+            }
+
+            try
+            {
+                await context.SaveChangesAsync(stoppingToken);
+                _logger.LogWarning(
+                    "Recovered stale incremental task. TaskId: {TaskId}, RepositoryId: {RepositoryId}, Reason: {Reason}",
+                    task.Id,
+                    task.RepositoryId,
+                    task.ErrorMessage);
+            }
+            catch (DbUpdateConcurrencyException ex)
+            {
+                task.Status = originalStatus;
+                task.UpdatedAt = originalUpdatedAt;
+                task.CompletedAt = null;
+                task.ErrorMessage = null;
+                if (context is DbContext dbContext)
+                {
+                    dbContext.Entry(task).State = EntityState.Unchanged;
+                    dbContext.Entry(generationLock!).State = EntityState.Detached;
+                }
+
+                _logger.LogInformation(ex,
+                    "Skipped stale recovery because the generation lease was renewed concurrently. TaskId: {TaskId}, RepositoryId: {RepositoryId}",
+                    task.Id,
+                    task.RepositoryId);
+            }
         }
     }
 
@@ -376,7 +586,12 @@ public class IncrementalUpdateWorker : BackgroundService
                     continue;
                 }
 
-                if (ShouldNormalizeSnapshotBaseline(sourceInfo, branch.LastCommitId, remoteCommitId))
+                if (ShouldConsiderSnapshotBaselineNormalization(sourceInfo, branch.LastCommitId, remoteCommitId) &&
+                    await repositoryAnalyzer.CanNormalizeLocalGitSnapshotAsync(
+                        repository,
+                        branch.LastCommitId!,
+                        remoteCommitId,
+                        stoppingToken))
                 {
                     NormalizeSnapshotBaseline(repository, branch, remoteCommitId);
                     saveChanges = true;
@@ -422,7 +637,7 @@ public class IncrementalUpdateWorker : BackgroundService
             remoteCommitId);
     }
 
-    private static bool ShouldNormalizeSnapshotBaseline(
+    private static bool ShouldConsiderSnapshotBaselineNormalization(
         RepositorySourceInfo sourceInfo,
         string? previousCommitId,
         string remoteCommitId)
@@ -430,6 +645,15 @@ public class IncrementalUpdateWorker : BackgroundService
         return sourceInfo.SourceType == RepositorySourceType.LocalDirectory &&
                IsGitCommitId(remoteCommitId) &&
                IsDirectorySnapshotId(previousCommitId);
+    }
+
+    private sealed class IncrementalLeaseMonitor
+    {
+        private int _leaseLost;
+
+        public bool LeaseLost => Volatile.Read(ref _leaseLost) != 0;
+
+        public void MarkLost() => Interlocked.Exchange(ref _leaseLost, 1);
     }
 
     private static bool IsGitCommitId(string? commitId)

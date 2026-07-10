@@ -50,4 +50,14 @@ public class IncrementalUpdateOptions
     /// Priority assigned to manually triggered tasks.
     /// </summary>
     public int ManualTriggerPriority { get; set; } = 100;
+
+    /// <summary>
+    /// Maximum age of an incremental generation lease without a heartbeat.
+    /// </summary>
+    public int StaleTaskTimeoutMinutes { get; set; } = 30;
+
+    /// <summary>
+    /// Interval between incremental generation lease heartbeats.
+    /// </summary>
+    public int LeaseHeartbeatIntervalSeconds { get; set; } = 30;
 }
