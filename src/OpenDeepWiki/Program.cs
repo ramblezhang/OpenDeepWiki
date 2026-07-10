@@ -172,6 +172,7 @@ try
     builder.Services.AddScoped<IRepositoryFullRegenerationCleaner, RepositoryFullRegenerationCleaner>();
     builder.Services.AddScoped<IBranchFullGenerationCleaner, BranchFullGenerationCleaner>();
     builder.Services.AddScoped<IRepositoryGenerationLockService, RepositoryGenerationLockService>();
+    builder.Services.AddScoped<IGenerationWriteGuard, GenerationWriteGuard>();
     builder.Services.AddScoped<IRepositoryBranchProcessor, RepositoryBranchProcessor>();
     builder.Services.AddScoped<IBranchGenerationTaskService, BranchGenerationTaskService>();
     builder.Services.AddScoped<IRepositoryScanPlanResolver, RepositoryScanPlanResolver>();

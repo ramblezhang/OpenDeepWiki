@@ -21,6 +21,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
     private readonly IContext _context;
     private readonly IncrementalUpdateOptions _options;
     private readonly ILogger<IncrementalUpdateService> _logger;
+    private readonly IGenerationWriteGuard? _writeGuard;
 
     public IncrementalUpdateService(
         IRepositoryAnalyzer repositoryAnalyzer,
@@ -29,7 +30,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         ISubscriberNotificationService notificationService,
         IContext context,
         IOptions<IncrementalUpdateOptions> options,
-        ILogger<IncrementalUpdateService> logger)
+        ILogger<IncrementalUpdateService> logger,
+        IGenerationWriteGuard? writeGuard = null)
     {
         _repositoryAnalyzer = repositoryAnalyzer;
         _wikiGenerator = wikiGenerator;
@@ -38,6 +40,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         _context = context;
         _options = options.Value;
         _logger = logger;
+        _writeGuard = writeGuard;
     }
 
     /// <inheritdoc />
@@ -125,7 +128,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
     public async Task<IncrementalUpdateResult> ProcessIncrementalUpdateAsync(
         string repositoryId,
         string branchId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        GenerationLeaseHandle? lease = null)
     {
         var stopwatch = Stopwatch.StartNew();
 
@@ -146,6 +150,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                 throw new InvalidOperationException(
                     $"Repository or branch not found. RepositoryId: {repositoryId}, BranchId: {branchId}");
             }
+
+            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
 
             var previousCommitId = branch.LastCommitId;
             var workspace = await PrepareWorkspaceWithRetryAsync(
@@ -178,7 +184,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
 
             if (changedFiles.Length == 0 && !string.IsNullOrEmpty(previousCommitId))
             {
-                await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken);
+                await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken, lease);
 
                 stopwatch.Stop();
                 _logger.LogInformation(
@@ -214,7 +220,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                     workspace,
                     branchLanguage,
                     changedFiles,
-                    cancellationToken);
+                    cancellationToken,
+                    lease);
 
                 if (repository.GenerateSkill)
                 {
@@ -223,13 +230,14 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                         repository,
                         branch,
                         branchLanguage,
-                        cancellationToken);
+                        cancellationToken,
+                        lease);
                 }
 
                 updatedDocumentsCount++;
             }
 
-            await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken);
+            await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken, lease);
 
             await NotifySubscribersSafelyAsync(
                 repository,
@@ -259,6 +267,10 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                 Duration = stopwatch.Elapsed
             };
         }
+        catch (Exception ex) when (ex is GenerationLeaseLostException or LocalGitWorktreeDirtyException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             stopwatch.Stop();
@@ -284,6 +296,11 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         _logger.LogInformation(
             "Manual update triggered. RepositoryId: {RepositoryId}, BranchId: {BranchId}",
             repositoryId, branchId);
+
+        var repository = await _context.Repositories
+            .FirstOrDefaultAsync(item => item.Id == repositoryId && !item.IsDeleted, cancellationToken)
+            ?? throw new InvalidOperationException($"Repository not found: {repositoryId}");
+        await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
 
         var existingTask = await _context.IncrementalUpdateTasks
             .Where(t => !t.IsDeleted &&
@@ -343,7 +360,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         Repository repository,
         RepositoryBranch branch,
         string currentCommitId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        GenerationLeaseHandle? lease)
     {
         branch.LastCommitId = currentCommitId;
         branch.LastProcessedAt = DateTime.UtcNow;
@@ -352,7 +370,34 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         repository.LastUpdateCheckAt = DateTime.UtcNow;
         repository.UpdatedAt = DateTime.UtcNow;
 
-        await _context.SaveChangesAsync(cancellationToken);
+        await SaveChangesAsync(lease, cancellationToken);
+    }
+
+    private async Task ThrowIfLocalGitDirtyAsync(
+        Repository repository,
+        CancellationToken cancellationToken)
+    {
+        if (RepositorySource.Parse(repository.GitUrl).SourceType != RepositorySourceType.LocalDirectory)
+        {
+            return;
+        }
+
+        var preflight = await _repositoryAnalyzer.GetLocalGitPreflightAsync(repository, cancellationToken);
+        if (preflight.IsLocalGit && !preflight.IsClean)
+        {
+            throw new LocalGitWorktreeDirtyException(preflight);
+        }
+    }
+
+    private Task SaveChangesAsync(GenerationLeaseHandle? lease, CancellationToken cancellationToken)
+    {
+        if (lease is null)
+        {
+            return _context.SaveChangesAsync(cancellationToken);
+        }
+
+        return (_writeGuard ?? throw new InvalidOperationException("Generation write guard is not configured."))
+            .SaveChangesAsync(_context, lease, cancellationToken);
     }
 
     private async Task<RepositoryWorkspace> PrepareWorkspaceWithRetryAsync(

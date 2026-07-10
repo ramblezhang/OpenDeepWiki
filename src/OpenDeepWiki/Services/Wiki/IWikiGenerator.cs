@@ -71,7 +71,8 @@ public interface IWikiGenerator
         RepositoryWorkspace workspace,
         BranchLanguage branchLanguage,
         string[] changedFiles,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        GenerationLeaseHandle? lease = null);
 
     /// <summary>
     /// Translates wiki content from source language to target language.

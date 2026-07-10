@@ -31,6 +31,53 @@ public class IncrementalUpdateServiceTests
         Assert.Equal("same-sha", task.PreviousCommitId);
     }
 
+    [Theory]
+    [InlineData("staged")]
+    [InlineData("modified")]
+    [InlineData("untracked")]
+    public async Task TriggerManualUpdateAsync_WhenLocalGitIsDirty_RejectsAndPreservesState(string dirtyKind)
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            generateSkill: false,
+            RepositorySource.EncodeLocalDirectoryPath("/tmp/dirty-local-git"));
+        var branch = SeedBranch(context, repository.Id, "main", "snapshot-baseline");
+        var language = SeedBranchLanguage(context, branch.Id, "zh");
+        var doc = new DocFile { Id = Guid.NewGuid().ToString(), BranchLanguageId = language.Id, Content = "existing" };
+        context.DocFiles.Add(doc);
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Title = "Existing",
+            Path = "existing",
+            DocFileId = doc.Id
+        });
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer.Setup(item => item.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CreateDirtyPreflight(dirtyKind));
+        var service = CreateService(context, analyzer);
+
+        var exception = await Assert.ThrowsAsync<LocalGitWorktreeDirtyException>(
+            () => service.TriggerManualUpdateAsync(repository.Id, branch.Id));
+        await Assert.ThrowsAsync<LocalGitWorktreeDirtyException>(
+            () => service.ProcessIncrementalUpdateAsync(repository.Id, branch.Id));
+
+        Assert.Contains("Commit, stash, or clean", exception.Message);
+        Assert.Empty(await context.IncrementalUpdateTasks.ToListAsync());
+        Assert.Equal("snapshot-baseline", branch.LastCommitId);
+        Assert.Equal("existing", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Single(await context.DocCatalogs.ToListAsync());
+        analyzer.Verify(item => item.PrepareWorkspaceAsync(
+            It.IsAny<Repository>(),
+            It.IsAny<string>(),
+            It.IsAny<string?>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
     [Fact]
     public async Task ProcessIncrementalUpdateAsync_WhenHeadUnchanged_ReturnsSuccessWithoutDocumentUpdates()
     {
@@ -210,13 +257,16 @@ public class IncrementalUpdateServiceTests
         return new TestDbContext(options);
     }
 
-    private static Repository SeedRepository(TestDbContext context, bool generateSkill)
+    private static Repository SeedRepository(
+        TestDbContext context,
+        bool generateSkill,
+        string? gitUrl = null)
     {
         var repository = new Repository
         {
             Id = Guid.NewGuid().ToString(),
             OwnerUserId = "user-1",
-            GitUrl = "https://github.com/demo/repo.git",
+            GitUrl = gitUrl ?? "https://github.com/demo/repo.git",
             OrgName = "demo",
             RepoName = "repo",
             Status = RepositoryStatus.Completed,
@@ -226,6 +276,14 @@ public class IncrementalUpdateServiceTests
         context.Repositories.Add(repository);
         return repository;
     }
+
+    private static LocalGitPreflightResult CreateDirtyPreflight(string dirtyKind) => dirtyKind switch
+    {
+        "staged" => new LocalGitPreflightResult(true, "head", ["staged.cs"], [], []),
+        "modified" => new LocalGitPreflightResult(true, "head", [], ["modified.cs"], []),
+        "untracked" => new LocalGitPreflightResult(true, "head", [], [], ["untracked.cs"]),
+        _ => throw new ArgumentOutOfRangeException(nameof(dirtyKind))
+    };
 
     private static RepositoryBranch SeedBranch(
         TestDbContext context,

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using OpenDeepWiki.EFCore;
 using OpenDeepWiki.Entities;
+using OpenDeepWiki.Services.Repositories;
 
 namespace OpenDeepWiki.Services.Wiki;
 
@@ -13,6 +14,8 @@ public class CatalogStorage
 {
     private readonly IContext _context;
     private readonly string _branchLanguageId;
+    private readonly IGenerationWriteGuard? _generationWriteGuard;
+    private readonly GenerationLeaseHandle? _generationLease;
     
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -25,10 +28,16 @@ public class CatalogStorage
     /// </summary>
     /// <param name="context">The database context.</param>
     /// <param name="branchLanguageId">The branch language ID to operate on.</param>
-    public CatalogStorage(IContext context, string branchLanguageId)
+    public CatalogStorage(
+        IContext context,
+        string branchLanguageId,
+        IGenerationWriteGuard? generationWriteGuard = null,
+        GenerationLeaseHandle? generationLease = null)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _branchLanguageId = branchLanguageId ?? throw new ArgumentNullException(nameof(branchLanguageId));
+        _generationWriteGuard = generationWriteGuard;
+        _generationLease = generationLease;
     }
 
     /// <summary>
@@ -87,7 +96,7 @@ public class CatalogStorage
 
         // Create new catalog items
         await CreateCatalogItemsAsync(root.Items, null, cancellationToken);
-        await _context.SaveChangesAsync(cancellationToken);
+        await SaveChangesAsync(cancellationToken);
     }
 
     /// <summary>
@@ -150,7 +159,7 @@ public class CatalogStorage
             await CreateCatalogItemsAsync(updatedItem.Children, existingCatalog.Id, cancellationToken);
         }
 
-        await _context.SaveChangesAsync(cancellationToken);
+        await SaveChangesAsync(cancellationToken);
     }
 
     /// <summary>
@@ -274,5 +283,16 @@ public class CatalogStorage
                 await CreateCatalogItemsAsync(item.Children, catalogId, cancellationToken);
             }
         }
+    }
+
+    private Task SaveChangesAsync(CancellationToken cancellationToken)
+    {
+        if (_generationLease is null)
+        {
+            return _context.SaveChangesAsync(cancellationToken);
+        }
+
+        return (_generationWriteGuard ?? throw new InvalidOperationException("Generation write guard is not configured."))
+            .SaveChangesAsync(_context, _generationLease, cancellationToken);
     }
 }

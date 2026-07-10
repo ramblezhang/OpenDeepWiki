@@ -31,6 +31,10 @@ public interface IRepositoryAnalyzer
         string expectedCommitId,
         CancellationToken cancellationToken = default);
 
+    Task<LocalGitPreflightResult> GetLocalGitPreflightAsync(
+        Repository repository,
+        CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Clones or updates a repository to a local working directory.
     /// </summary>
@@ -75,6 +79,24 @@ public interface IRepositoryAnalyzer
     Task<string?> DetectPrimaryLanguageAsync(
         RepositoryWorkspace workspace,
         CancellationToken cancellationToken = default);
+}
+
+public sealed record LocalGitPreflightResult(
+    bool IsLocalGit,
+    string? HeadCommitId,
+    IReadOnlyList<string> StagedFiles,
+    IReadOnlyList<string> ModifiedFiles,
+    IReadOnlyList<string> UntrackedFiles)
+{
+    public bool IsClean => StagedFiles.Count == 0 && ModifiedFiles.Count == 0 && UntrackedFiles.Count == 0;
+}
+
+public sealed class LocalGitWorktreeDirtyException(LocalGitPreflightResult preflight)
+    : InvalidOperationException(
+        $"Local Git worktree has uncommitted changes (staged={preflight.StagedFiles.Count}, modified={preflight.ModifiedFiles.Count}, untracked={preflight.UntrackedFiles.Count}). Commit, stash, or clean the worktree and retry.")
+{
+    public const string ErrorCode = "LOCAL_GIT_WORKTREE_DIRTY";
+    public LocalGitPreflightResult Preflight { get; } = preflight;
 }
 
 /// <summary>

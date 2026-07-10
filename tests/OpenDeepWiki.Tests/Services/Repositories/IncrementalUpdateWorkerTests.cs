@@ -82,6 +82,8 @@ public class IncrementalUpdateWorkerTests
         await context.SaveChangesAsync();
 
         var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer.Setup(x => x.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new LocalGitPreflightResult(true, GitCommitA, [], [], []));
         analyzer
             .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
             .ReturnsAsync(GitCommitA);
@@ -117,6 +119,8 @@ public class IncrementalUpdateWorkerTests
         await context.SaveChangesAsync();
 
         var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer.Setup(x => x.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new LocalGitPreflightResult(true, GitCommitA, [], [], []));
         analyzer
             .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
             .ReturnsAsync(GitCommitA);
@@ -139,6 +143,62 @@ public class IncrementalUpdateWorkerTests
         Assert.Equal(SnapshotHash, task.PreviousCommitId);
         Assert.Equal(GitCommitA, task.TargetCommitId);
         Assert.Equal(SnapshotHash, branch.LastCommitId);
+        analyzer.VerifyAll();
+    }
+
+    [Theory]
+    [InlineData("staged")]
+    [InlineData("modified")]
+    [InlineData("untracked")]
+    public async Task CheckScheduledUpdatesAsync_WhenLocalGitIsDirty_PreservesBaselineAndDocuments(string dirtyKind)
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            60,
+            DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath("/tmp/dirty-source"));
+        var branch = SeedBranch(context, repository.Id, "main", SnapshotHash);
+        var languageId = Guid.NewGuid().ToString();
+        var docId = Guid.NewGuid().ToString();
+        context.BranchLanguages.Add(new BranchLanguage
+        {
+            Id = languageId,
+            RepositoryBranchId = branch.Id,
+            LanguageCode = "zh",
+            IsDefault = true
+        });
+        context.DocFiles.Add(new DocFile
+        {
+            Id = docId,
+            BranchLanguageId = languageId,
+            Content = "existing-doc"
+        });
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = languageId,
+            Title = "Existing",
+            Path = "existing",
+            DocFileId = docId
+        });
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer.Setup(item => item.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(CreateDirtyPreflight(dirtyKind));
+
+        await InvokeCheckScheduledUpdatesAsync(
+            CreateWorker(), context, Mock.Of<IGitPlatformService>(), analyzer.Object);
+
+        Assert.Equal(SnapshotHash, branch.LastCommitId);
+        Assert.Equal("existing-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Single(await context.DocCatalogs.ToListAsync());
+        var audit = await context.IncrementalUpdateTasks.SingleAsync();
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, audit.Status);
+        Assert.StartsWith(LocalGitWorktreeDirtyException.ErrorCode, audit.ErrorMessage);
+        Assert.DoesNotContain(await context.IncrementalUpdateTasks.ToListAsync(), task =>
+            task.Status is IncrementalUpdateStatus.Pending or IncrementalUpdateStatus.Processing);
         analyzer.VerifyAll();
     }
 
@@ -247,7 +307,8 @@ public class IncrementalUpdateWorkerTests
             .Setup(service => service.ProcessIncrementalUpdateAsync(
                 repository.Id,
                 branch.Id,
-                It.IsAny<CancellationToken>()))
+                It.IsAny<CancellationToken>(),
+                It.IsAny<GenerationLeaseHandle?>()))
             .Returns(async () =>
             {
                 await Task.Delay(TimeSpan.FromMilliseconds(1200));
@@ -321,6 +382,8 @@ public class IncrementalUpdateWorkerTests
         await context.SaveChangesAsync();
 
         var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer.Setup(x => x.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new LocalGitPreflightResult(true, GitCommitB, [], [], []));
         analyzer
             .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
             .ReturnsAsync(GitCommitB);
@@ -380,6 +443,8 @@ public class IncrementalUpdateWorkerTests
         await context.SaveChangesAsync();
 
         var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer.Setup(x => x.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new LocalGitPreflightResult(false, null, [], [], []));
         analyzer
             .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
             .ReturnsAsync((string?)null);
@@ -560,7 +625,14 @@ public class IncrementalUpdateWorkerTests
         Assert.NotNull(method);
         var invocation = (Task?)method!.Invoke(
             worker,
-            [context, updateService, lockService, task, CancellationToken.None]);
+            [
+                context,
+                updateService,
+                lockService,
+                new GenerationWriteGuard(Options.Create(new IncrementalUpdateOptions())),
+                task,
+                CancellationToken.None
+            ]);
         Assert.NotNull(invocation);
         await invocation!;
     }
@@ -584,6 +656,14 @@ public class IncrementalUpdateWorkerTests
         context.IncrementalUpdateTasks.Add(task);
         return task;
     }
+
+    private static LocalGitPreflightResult CreateDirtyPreflight(string dirtyKind) => dirtyKind switch
+    {
+        "staged" => new LocalGitPreflightResult(true, GitCommitA, ["staged.cs"], [], []),
+        "modified" => new LocalGitPreflightResult(true, GitCommitA, [], ["modified.cs"], []),
+        "untracked" => new LocalGitPreflightResult(true, GitCommitA, [], [], ["untracked.cs"]),
+        _ => throw new ArgumentOutOfRangeException(nameof(dirtyKind))
+    };
 
     private static TestDbContext CreateContext()
     {

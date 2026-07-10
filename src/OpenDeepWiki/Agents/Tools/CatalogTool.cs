@@ -3,6 +3,7 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using OpenDeepWiki.Entities;
 using OpenDeepWiki.Services.Wiki;
+using OpenDeepWiki.Services.Repositories;
 
 namespace OpenDeepWiki.Agents.Tools;
 
@@ -96,6 +97,10 @@ JSON Format:
         {
             return $"ERROR: Catalog validation failed: {ex.Message}";
         }
+        catch (GenerationLeaseLostException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return $"ERROR: Failed to validate catalog: {ex.Message}";
@@ -105,6 +110,10 @@ JSON Format:
         {
             await _storage.SetCatalogAsync(catalogJson, cancellationToken);
             return "SUCCESS: Catalog has been written successfully.";
+        }
+        catch (GenerationLeaseLostException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -173,6 +182,10 @@ nodeJson: {""title"": ""Updated Title"", ""path"": ""1-overview"", ""order"": 1,
         {
             await _storage.UpdateNodeAsync(path, nodeJson, cancellationToken);
             return $"SUCCESS: Catalog node '{path}' has been updated successfully.";
+        }
+        catch (GenerationLeaseLostException)
+        {
+            throw;
         }
         catch (Exception ex)
         {

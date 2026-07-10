@@ -16,7 +16,8 @@ public interface IIncrementalUpdateService
     Task<IncrementalUpdateResult> ProcessIncrementalUpdateAsync(
         string repositoryId,
         string branchId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        GenerationLeaseHandle? lease = null);
 
     /// <summary>
     /// 检查仓库是否需要增量更新

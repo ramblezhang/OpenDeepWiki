@@ -245,6 +245,31 @@ public class RepositoryAnalyzerSourceTests
     }
 
     [Fact]
+    public async Task GetLocalGitPreflightAsync_ClassifiesStagedModifiedAndUntrackedFiles()
+    {
+        var repositoriesRoot = CreateTempDirectory();
+        var sourceRoot = CreateTempDirectory();
+        CreateGitRepositoryWithBranches(sourceRoot, "branch-a", "branch-b");
+        var analyzer = CreateAnalyzer(repositoriesRoot);
+        var repository = CreateLocalSourceRepository(sourceRoot);
+
+        File.WriteAllText(Path.Combine(sourceRoot, "staged.txt"), "staged");
+        using (var git = new GitRepository(sourceRoot))
+        {
+            GitCommands.Stage(git, "staged.txt");
+        }
+        File.WriteAllText(Path.Combine(sourceRoot, "branch.txt"), "modified");
+        File.WriteAllText(Path.Combine(sourceRoot, "untracked.txt"), "untracked");
+
+        var preflight = await analyzer.GetLocalGitPreflightAsync(repository);
+
+        Assert.False(preflight.IsClean);
+        Assert.Contains("staged.txt", preflight.StagedFiles);
+        Assert.Contains("branch.txt", preflight.ModifiedFiles);
+        Assert.Contains("untracked.txt", preflight.UntrackedFiles);
+    }
+
+    [Fact]
     public async Task PrepareWorkspaceAsync_WhenWorkspaceIsPlainDirectoryInsideParentGitRepo_ReclonesTargetBranch()
     {
         var parentRoot = CreateTempDirectory();

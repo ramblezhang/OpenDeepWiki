@@ -8,7 +8,8 @@ using OpenDeepWiki.Entities;
 
 namespace OpenDeepWiki.Services.Repositories;
 
-public partial class RepositorySkillMarkdownBuilder : IRepositorySkillMarkdownBuilder
+public partial class RepositorySkillMarkdownBuilder(IGenerationWriteGuard? generationWriteGuard = null)
+    : IRepositorySkillMarkdownBuilder
 {
     private const int MaxSkillNameLength = 64;
     private static readonly Encoding ZipEntryEncoding = new UTF8Encoding(false);
@@ -18,7 +19,8 @@ public partial class RepositorySkillMarkdownBuilder : IRepositorySkillMarkdownBu
         Repository repository,
         RepositoryBranch branch,
         BranchLanguage language,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        GenerationLeaseHandle? lease = null)
     {
         var catalogs = await context.DocCatalogs
             .AsNoTracking()
@@ -32,7 +34,15 @@ public partial class RepositorySkillMarkdownBuilder : IRepositorySkillMarkdownBu
         language.SkillGeneratedAt = generatedAtUtc;
         language.UpdateTimestamp();
         context.BranchLanguages.Update(language);
-        await context.SaveChangesAsync(cancellationToken);
+        if (lease is null)
+        {
+            await context.SaveChangesAsync(cancellationToken);
+        }
+        else
+        {
+            await (generationWriteGuard ?? throw new InvalidOperationException("Generation write guard is not configured."))
+                .SaveChangesAsync(context, lease, cancellationToken);
+        }
     }
 
     public string BuildSkillMarkdown(

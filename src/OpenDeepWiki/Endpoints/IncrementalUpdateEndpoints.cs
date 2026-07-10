@@ -117,6 +117,20 @@ public static class IncrementalUpdateEndpoints
                     : "增量更新任务已创建"
             });
         }
+        catch (LocalGitWorktreeDirtyException ex)
+        {
+            logger.LogWarning(ex,
+                "Local Git incremental update rejected because the worktree is dirty. RepositoryId: {RepositoryId}, BranchId: {BranchId}",
+                repositoryId,
+                branchId);
+            return Results.Conflict(new IncrementalUpdateErrorResponse
+            {
+                Success = false,
+                Error = "本地 Git 工作区存在未提交变更，请 commit、stash 或 clean 后重试",
+                ErrorCode = LocalGitWorktreeDirtyException.ErrorCode,
+                Details = ex.Message
+            });
+        }
         catch (Exception ex)
         {
             logger.LogError(ex,

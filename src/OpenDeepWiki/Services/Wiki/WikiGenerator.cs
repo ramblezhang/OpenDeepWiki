@@ -76,6 +76,7 @@ public class WikiGenerator : IWikiGenerator
     private readonly ISkillToolConverter _skillToolConverter;
     private readonly IAiProviderResolver _aiProviderResolver;
     private readonly IRepositoryScanPlanResolver _scanPlanResolver;
+    private readonly IGenerationWriteGuard? _generationWriteGuard;
 
     // Use AsyncLocal for thread-safe repository ID tracking in concurrent scenarios
     private static readonly AsyncLocal<string?> _currentRepositoryId = new();
@@ -98,7 +99,8 @@ public class WikiGenerator : IWikiGenerator
         IProcessingLogService processingLogService,
         ISkillToolConverter skillToolConverter,
         IAiProviderResolver aiProviderResolver,
-        IRepositoryScanPlanResolver scanPlanResolver)
+        IRepositoryScanPlanResolver scanPlanResolver,
+        IGenerationWriteGuard? generationWriteGuard = null)
     {
         _agentFactory = agentFactory ?? throw new ArgumentNullException(nameof(agentFactory));
         _promptPlugin = promptPlugin ?? throw new ArgumentNullException(nameof(promptPlugin));
@@ -110,6 +112,7 @@ public class WikiGenerator : IWikiGenerator
         _skillToolConverter = skillToolConverter ?? throw new ArgumentNullException(nameof(skillToolConverter));
         _aiProviderResolver = aiProviderResolver ?? throw new ArgumentNullException(nameof(aiProviderResolver));
         _scanPlanResolver = scanPlanResolver ?? throw new ArgumentNullException(nameof(scanPlanResolver));
+        _generationWriteGuard = generationWriteGuard;
 
         _logger.LogDebug(
             "WikiGenerator initialized. CatalogModel: {CatalogModel}, ContentModel: {ContentModel}, MaxRetryAttempts: {MaxRetry}",
@@ -660,7 +663,8 @@ Execute the workflow now. The runtime context already contains the directory tre
         RepositoryWorkspace workspace,
         BranchLanguage branchLanguage,
         string[] changedFiles,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        GenerationLeaseHandle? lease = null)
     {
         if (changedFiles.Length == 0)
         {
@@ -694,9 +698,15 @@ Execute the workflow now. The runtime context already contains the directory tre
             _logger.LogDebug("Initializing tools for incremental update");
             var toolSnapshot = await CreateToolSnapshotAsync(cancellationToken);
             var gitTool = new GitTool(workspace.WorkingDirectory);
-            var catalogStorage = new CatalogStorage(_context, branchLanguage.Id);
+            var catalogStorage = new CatalogStorage(_context, branchLanguage.Id, _generationWriteGuard, lease);
             var catalogTool = new CatalogTool(catalogStorage);
-            var docTool = new DocTool(_context, branchLanguage.Id, string.Empty, gitTool);
+            var docTool = new DocTool(
+                _context,
+                branchLanguage.Id,
+                string.Empty,
+                gitTool,
+                generationWriteGuard: _generationWriteGuard,
+                generationLease: lease);
 
             // Incremental updates must never replace the whole catalog: exclude WriteCatalog
             // so the agent can only modify existing structure via EditCatalog.

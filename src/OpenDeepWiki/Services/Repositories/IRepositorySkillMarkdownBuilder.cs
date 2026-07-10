@@ -18,7 +18,8 @@ public interface IRepositorySkillMarkdownBuilder
         Repository repository,
         RepositoryBranch branch,
         BranchLanguage language,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        GenerationLeaseHandle? lease = null);
 
     Task AddDocumentsToArchiveAsync(
         ZipArchive archive,

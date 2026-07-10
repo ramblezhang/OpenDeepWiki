@@ -157,41 +157,68 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             return false;
         }
 
-        if (localGitSource.AccessMode == LocalGitAccessMode.LibGit2)
+        var preflight = await GetLocalGitPreflightAsync(repository, cancellationToken);
+        return preflight.IsClean &&
+               string.Equals(preflight.HeadCommitId, expectedCommitId, StringComparison.Ordinal);
+    }
+
+    /// <inheritdoc />
+    public async Task<LocalGitPreflightResult> GetLocalGitPreflightAsync(
+        Entities.Repository repository,
+        CancellationToken cancellationToken = default)
+    {
+        var sourceInfo = RepositorySource.Parse(repository.GitUrl);
+        if (sourceInfo.SourceType != RepositorySourceType.LocalDirectory ||
+            !TryResolveLocalGitSource(sourceInfo.Location, out var localGitSource, out _))
         {
-            return await Task.Run(() =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                using var localRepository = new GitRepository(localGitSource.RepositoryPath);
-                return string.Equals(localRepository.Head.Tip?.Sha, expectedCommitId, StringComparison.Ordinal) &&
-                       !localRepository.RetrieveStatus(new StatusOptions
-                       {
-                           IncludeUntracked = true,
-                           RecurseUntrackedDirs = true
-                       }).IsDirty;
-            }, cancellationToken);
+            return new LocalGitPreflightResult(false, null, [], [], []);
         }
 
         var safeDirectories = BuildGitCliSafeDirectories(localGitSource.RepositoryPath);
-        var headResult = await RunGitCliAsync(
+        var head = await RunGitCliAsync(
             localGitSource.RepositoryPath,
             ["rev-parse", "HEAD"],
             cancellationToken,
-            throwOnError: false,
+            throwOnError: true,
             safeDirectories: safeDirectories);
-        if (headResult.ExitCode != 0 ||
-            !string.Equals(headResult.Output.Trim(), expectedCommitId, StringComparison.Ordinal))
+        var status = await RunGitCliAsync(
+            localGitSource.RepositoryPath,
+            ["status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"],
+            cancellationToken,
+            throwOnError: true,
+            safeDirectories: safeDirectories);
+
+        var staged = new List<string>();
+        var modified = new List<string>();
+        var untracked = new List<string>();
+        foreach (var line in status.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
-            return false;
+            if (line.StartsWith("? ", StringComparison.Ordinal))
+            {
+                untracked.Add(line[2..]);
+                continue;
+            }
+
+            var fields = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (fields.Length < 3 || fields[0] is not ("1" or "2"))
+            {
+                continue;
+            }
+
+            var state = fields[1];
+            var path = fields[^1];
+            if (state.Length == 2 && state[0] != '.')
+            {
+                staged.Add(path);
+            }
+
+            if (state.Length == 2 && state[1] != '.')
+            {
+                modified.Add(path);
+            }
         }
 
-        var statusResult = await RunGitCliAsync(
-            localGitSource.RepositoryPath,
-            ["status", "--porcelain=v1", "--untracked-files=all"],
-            cancellationToken,
-            throwOnError: false,
-            safeDirectories: safeDirectories);
-        return statusResult.ExitCode == 0 && string.IsNullOrWhiteSpace(statusResult.Output);
+        return new LocalGitPreflightResult(true, head.Output.Trim(), staged, modified, untracked);
     }
 
     /// <inheritdoc />

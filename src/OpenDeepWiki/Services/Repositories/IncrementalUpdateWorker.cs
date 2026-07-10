@@ -72,6 +72,7 @@ public class IncrementalUpdateWorker : BackgroundService
         var gitPlatformService = scope.ServiceProvider.GetRequiredService<IGitPlatformService>();
         var repositoryAnalyzer = scope.ServiceProvider.GetRequiredService<IRepositoryAnalyzer>();
         var generationLockService = scope.ServiceProvider.GetRequiredService<IRepositoryGenerationLockService>();
+        var writeGuard = scope.ServiceProvider.GetRequiredService<IGenerationWriteGuard>();
 
         await RecoverStaleTasksAsync(context, stoppingToken);
 
@@ -86,7 +87,7 @@ public class IncrementalUpdateWorker : BackgroundService
             }
 
             await ProcessSingleTaskAsync(
-                context, updateService, generationLockService, task, stoppingToken);
+                context, updateService, generationLockService, writeGuard, task, stoppingToken);
         }
 
         await CheckScheduledUpdatesAsync(context, gitPlatformService, repositoryAnalyzer, stoppingToken);
@@ -107,6 +108,7 @@ public class IncrementalUpdateWorker : BackgroundService
         IContext context,
         IIncrementalUpdateService updateService,
         IRepositoryGenerationLockService generationLockService,
+        IGenerationWriteGuard writeGuard,
         IncrementalUpdateTask task,
         CancellationToken stoppingToken)
     {
@@ -117,17 +119,18 @@ public class IncrementalUpdateWorker : BackgroundService
         var leaseMonitor = new IncrementalLeaseMonitor();
         using var processingCancellation = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
         Task? heartbeatTask = null;
+        GenerationLeaseHandle? lease = null;
 
         try
         {
-            var lockAcquired = await generationLockService.TryAcquireAsync(
+            lease = await generationLockService.TryAcquireLeaseAsync(
                 context,
                 task.RepositoryId,
                 RepositoryGenerationLockOwnerType.IncrementalTask,
                 task.Id,
                 RepositoryGenerationLockScope.Branch,
                 stoppingToken);
-            if (!lockAcquired)
+            if (lease is null)
             {
                 _logger.LogDebug(
                     "Incremental task is blocked by an active generation lock. TaskId: {TaskId}, RepositoryId: {RepositoryId}",
@@ -137,15 +140,18 @@ public class IncrementalUpdateWorker : BackgroundService
             }
 
             await UpdateTaskStatusAsync(
-                context, task, IncrementalUpdateStatus.Processing, null, stoppingToken);
+                context, writeGuard, lease, task, IncrementalUpdateStatus.Processing, null, stoppingToken);
             heartbeatTask = RunLeaseHeartbeatAsync(
-                task,
+                task, lease,
                 leaseMonitor,
                 processingCancellation,
                 processingCancellation.Token);
 
             var result = await updateService.ProcessIncrementalUpdateAsync(
-                task.RepositoryId, task.BranchId, processingCancellation.Token);
+                task.RepositoryId,
+                task.BranchId,
+                processingCancellation.Token,
+                lease);
 
             if (leaseMonitor.LeaseLost)
             {
@@ -160,7 +166,7 @@ public class IncrementalUpdateWorker : BackgroundService
             {
                 task.TargetCommitId = result.CurrentCommitId;
                 await UpdateTaskStatusAsync(
-                    context, task, IncrementalUpdateStatus.Completed, null, stoppingToken);
+                    context, writeGuard, lease, task, IncrementalUpdateStatus.Completed, null, stoppingToken);
 
                 _logger.LogInformation(
                     "Task completed successfully. TaskId: {TaskId}, ChangedFiles: {ChangedFiles}, Duration: {Duration}ms",
@@ -169,7 +175,7 @@ public class IncrementalUpdateWorker : BackgroundService
             else
             {
                 await UpdateTaskStatusAsync(
-                    context, task, IncrementalUpdateStatus.Failed, result.ErrorMessage, stoppingToken);
+                    context, writeGuard, lease, task, IncrementalUpdateStatus.Failed, result.ErrorMessage, stoppingToken);
 
                 _logger.LogWarning(
                     "Task failed. TaskId: {TaskId}, Error: {Error}",
@@ -181,10 +187,32 @@ public class IncrementalUpdateWorker : BackgroundService
             _logger.LogInformation("Task processing cancelled. TaskId: {TaskId}", task.Id);
             throw;
         }
+        catch (GenerationLeaseLostException ex)
+        {
+            leaseMonitor.MarkLost();
+            _logger.LogWarning(ex, "Incremental task lost its fencing token. TaskId: {TaskId}", task.Id);
+        }
+        catch (LocalGitWorktreeDirtyException ex)
+        {
+            if (lease is not null)
+            {
+                await UpdateTaskStatusAsync(
+                    context,
+                    writeGuard,
+                    lease,
+                    task,
+                    IncrementalUpdateStatus.Cancelled,
+                    $"{LocalGitWorktreeDirtyException.ErrorCode}: {ex.Message}",
+                    stoppingToken);
+            }
+        }
         catch (Exception ex)
         {
-            await UpdateTaskStatusAsync(
-                context, task, IncrementalUpdateStatus.Failed, ex.Message, stoppingToken);
+            if (lease is not null)
+            {
+                await UpdateTaskStatusAsync(
+                    context, writeGuard, lease, task, IncrementalUpdateStatus.Failed, ex.Message, stoppingToken);
+            }
 
             _logger.LogError(ex,
                 "Task processing failed with exception. TaskId: {TaskId}",
@@ -198,12 +226,16 @@ public class IncrementalUpdateWorker : BackgroundService
                 await AwaitHeartbeatShutdownAsync(heartbeatTask);
             }
 
-            await ReleaseIncrementalLeaseAsync(task, CancellationToken.None);
+            if (lease is not null)
+            {
+                await ReleaseIncrementalLeaseAsync(lease, CancellationToken.None);
+            }
         }
     }
 
     private async Task RunLeaseHeartbeatAsync(
         IncrementalUpdateTask task,
+        GenerationLeaseHandle lease,
         IncrementalLeaseMonitor leaseMonitor,
         CancellationTokenSource processingCancellation,
         CancellationToken cancellationToken)
@@ -221,13 +253,8 @@ public class IncrementalUpdateWorker : BackgroundService
                 await Task.Delay(interval, cancellationToken);
                 using var scope = _scopeFactory.CreateScope();
                 var heartbeatContext = scope.ServiceProvider.GetRequiredService<IContext>();
-                var generationLock = await heartbeatContext.RepositoryGenerationLocks
-                    .FirstOrDefaultAsync(item =>
-                        !item.IsDeleted &&
-                        item.RepositoryId == task.RepositoryId &&
-                        item.OwnerType == RepositoryGenerationLockOwnerType.IncrementalTask &&
-                        item.OwnerId == task.Id,
-                        cancellationToken);
+                var lockService = scope.ServiceProvider.GetRequiredService<IRepositoryGenerationLockService>();
+                var renewed = await lockService.RenewLeaseAsync(heartbeatContext, lease, cancellationToken);
                 var persistedTask = await heartbeatContext.IncrementalUpdateTasks
                     .FirstOrDefaultAsync(item =>
                         !item.IsDeleted &&
@@ -235,7 +262,7 @@ public class IncrementalUpdateWorker : BackgroundService
                         item.Status == IncrementalUpdateStatus.Processing,
                         cancellationToken);
 
-                if (generationLock is null || persistedTask is null)
+                if (!renewed || persistedTask is null)
                 {
                     leaseMonitor.MarkLost();
                     processingCancellation.Cancel();
@@ -243,7 +270,6 @@ public class IncrementalUpdateWorker : BackgroundService
                 }
 
                 var now = DateTime.UtcNow;
-                generationLock.UpdatedAt = now;
                 persistedTask.UpdatedAt = now;
                 await heartbeatContext.SaveChangesAsync(cancellationToken);
             }
@@ -283,18 +309,14 @@ public class IncrementalUpdateWorker : BackgroundService
     }
 
     private async Task ReleaseIncrementalLeaseAsync(
-        IncrementalUpdateTask task,
+        GenerationLeaseHandle lease,
         CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
         var releaseContext = scope.ServiceProvider.GetRequiredService<IContext>();
         var releaseService = scope.ServiceProvider.GetRequiredService<IRepositoryGenerationLockService>();
-        await releaseService.ReleaseAsync(
-            releaseContext,
-            task.RepositoryId,
-            RepositoryGenerationLockOwnerType.IncrementalTask,
-            task.Id,
-            cancellationToken);
+        await releaseService.ReleaseLeaseAsync(
+            releaseContext, lease, cancellationToken);
     }
 
     private async Task RecoverStaleTasksAsync(IContext context, CancellationToken stoppingToken)
@@ -365,6 +387,8 @@ public class IncrementalUpdateWorker : BackgroundService
 
     private async Task UpdateTaskStatusAsync(
         IContext context,
+        IGenerationWriteGuard writeGuard,
+        GenerationLeaseHandle lease,
         IncrementalUpdateTask task,
         IncrementalUpdateStatus status,
         string? errorMessage,
@@ -381,6 +405,7 @@ public class IncrementalUpdateWorker : BackgroundService
                 break;
             case IncrementalUpdateStatus.Completed:
             case IncrementalUpdateStatus.Failed:
+            case IncrementalUpdateStatus.Cancelled:
                 task.CompletedAt = DateTime.UtcNow;
                 if (status == IncrementalUpdateStatus.Failed)
                 {
@@ -389,7 +414,7 @@ public class IncrementalUpdateWorker : BackgroundService
                 break;
         }
 
-        await context.SaveChangesAsync(stoppingToken);
+        await writeGuard.SaveChangesAsync(context, lease, stoppingToken);
     }
 
     private async Task CheckScheduledUpdatesAsync(
@@ -504,6 +529,50 @@ public class IncrementalUpdateWorker : BackgroundService
 
             var sourceInfo = RepositorySource.Parse(repository.GitUrl);
             var saveChanges = false;
+
+            var preflight = sourceInfo.SourceType == RepositorySourceType.LocalDirectory
+                ? await repositoryAnalyzer.GetLocalGitPreflightAsync(repository, stoppingToken)
+                : new LocalGitPreflightResult(false, null, [], [], []);
+            if (preflight.IsLocalGit && !preflight.IsClean)
+            {
+                var now = DateTime.UtcNow;
+                foreach (var branch in branches)
+                {
+                    var alreadyRecorded = await context.IncrementalUpdateTasks.AnyAsync(task =>
+                        !task.IsDeleted &&
+                        task.RepositoryId == repository.Id &&
+                        task.BranchId == branch.Id &&
+                        task.Status == IncrementalUpdateStatus.Cancelled &&
+                        task.ErrorMessage != null &&
+                        task.ErrorMessage.StartsWith(LocalGitWorktreeDirtyException.ErrorCode),
+                        stoppingToken);
+                    if (alreadyRecorded)
+                    {
+                        continue;
+                    }
+
+                    context.IncrementalUpdateTasks.Add(new IncrementalUpdateTask
+                    {
+                        Id = Guid.NewGuid().ToString(),
+                        RepositoryId = repository.Id,
+                        BranchId = branch.Id,
+                        PreviousCommitId = branch.LastCommitId,
+                        Status = IncrementalUpdateStatus.Cancelled,
+                        ErrorMessage = $"{LocalGitWorktreeDirtyException.ErrorCode}: " +
+                                       $"staged={preflight.StagedFiles.Count}, modified={preflight.ModifiedFiles.Count}, untracked={preflight.UntrackedFiles.Count}. " +
+                                       "Commit, stash, or clean the worktree and retry.",
+                        IsManualTrigger = false,
+                        CreatedAt = now,
+                        CompletedAt = now,
+                        UpdatedAt = now
+                    });
+                }
+
+                repository.LastUpdateCheckAt = now;
+                repository.UpdatedAt = now;
+                await context.SaveChangesAsync(stoppingToken);
+                return;
+            }
 
             foreach (var branch in branches)
             {

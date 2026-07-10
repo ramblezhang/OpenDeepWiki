@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.AI;
 using OpenDeepWiki.EFCore;
 using OpenDeepWiki.Entities;
+using OpenDeepWiki.Services.Repositories;
 
 namespace OpenDeepWiki.Agents.Tools;
 
@@ -18,6 +19,8 @@ public class DocTool
     private readonly string? _catalogPath;
     private readonly GitTool? _gitTool;
     private readonly int? _maxAppendOperations;
+    private readonly IGenerationWriteGuard? _generationWriteGuard;
+    private readonly GenerationLeaseHandle? _generationLease;
     private int _appendOperations;
     private const int MaxDatabaseWriteAttempts = 3;
     private const int DatabaseWriteRetryBaseDelayMs = 250;
@@ -35,13 +38,17 @@ public class DocTool
         string branchLanguageId,
         string? catalogPath,
         GitTool? gitTool = null,
-        int? maxAppendOperations = null)
+        int? maxAppendOperations = null,
+        IGenerationWriteGuard? generationWriteGuard = null,
+        GenerationLeaseHandle? generationLease = null)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _branchLanguageId = branchLanguageId ?? throw new ArgumentNullException(nameof(branchLanguageId));
         _catalogPath = NormalizeCatalogPath(catalogPath);
         _gitTool = gitTool;
         _maxAppendOperations = maxAppendOperations is > 0 ? maxAppendOperations : null;
+        _generationWriteGuard = generationWriteGuard;
+        _generationLease = generationLease;
     }
 
     /// <summary>
@@ -145,6 +152,10 @@ content: '# Overview\n\nThis is the overview section...'")]
 
             await SaveChangesWithRetryAsync(cancellationToken);
             return $"SUCCESS: Document '{catalogPath}' has been created successfully.";
+        }
+        catch (GenerationLeaseLostException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -263,6 +274,10 @@ content: '\n## Failure Modes\n\nThe service handles ... '")]
             _appendOperations++;
             return $"SUCCESS: Created document '{catalogPath}' and wrote initial content. Current length: {content.Length} characters.";
         }
+        catch (GenerationLeaseLostException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return $"ERROR: Failed to append to document '{catalogPath}': {ex.Message}";
@@ -350,6 +365,10 @@ newContent: '## New Section\n\nUpdated content here'")]
 
             await SaveChangesWithRetryAsync(cancellationToken);
             return $"SUCCESS: Document '{catalogPath}' has been edited successfully.";
+        }
+        catch (GenerationLeaseLostException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -501,7 +520,15 @@ Usage:
         {
             try
             {
-                await _context.SaveChangesAsync(cancellationToken);
+                if (_generationLease is null)
+                {
+                    await _context.SaveChangesAsync(cancellationToken);
+                }
+                else
+                {
+                    await (_generationWriteGuard ?? throw new InvalidOperationException("Generation write guard is not configured."))
+                        .SaveChangesAsync(_context, _generationLease, cancellationToken);
+                }
                 return;
             }
             catch (Exception ex) when (attempt < MaxDatabaseWriteAttempts && IsRetryableDatabaseWriteException(ex))
