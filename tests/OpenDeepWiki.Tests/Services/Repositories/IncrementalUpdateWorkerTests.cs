@@ -461,6 +461,55 @@ public class IncrementalUpdateWorkerTests
     }
 
     [Fact]
+    public async Task ProcessSingleTaskAsync_WhenDraftPublishConflicts_CancelsWithExplainableError()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, 60, DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", GitCommitA);
+        var task = new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            Status = IncrementalUpdateStatus.Pending,
+            CreatedAt = DateTime.UtcNow
+        };
+        context.IncrementalUpdateTasks.Add(task);
+        await context.SaveChangesAsync();
+
+        var updateService = new Mock<IIncrementalUpdateService>(MockBehavior.Strict);
+        updateService
+            .Setup(item => item.ProcessIncrementalUpdateAsync(
+                repository.Id,
+                branch.Id,
+                It.IsAny<CancellationToken>(),
+                It.IsAny<GenerationLeaseHandle?>()))
+            .ThrowsAsync(new IncrementalWikiPublishConflictException(nameof(DocFile), "doc-1"));
+        var services = new ServiceCollection();
+        services.AddSingleton<IContext>(context);
+        services.AddScoped<IRepositoryGenerationLockService, RepositoryGenerationLockService>();
+        await using var provider = services.BuildServiceProvider();
+        var worker = new IncrementalUpdateWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<IncrementalUpdateWorker>.Instance,
+            Options.Create(new IncrementalUpdateOptions()));
+
+        await InvokeProcessSingleTaskAsync(
+            worker,
+            context,
+            updateService.Object,
+            new RepositoryGenerationLockService(context),
+            task);
+
+        context.ChangeTracker.Clear();
+        var persistedTask = await context.IncrementalUpdateTasks.SingleAsync();
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, persistedTask.Status);
+        Assert.Contains("publish conflict", persistedTask.ErrorMessage, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(await context.RepositoryGenerationLocks.ToListAsync());
+        updateService.VerifyAll();
+    }
+
+    [Fact]
     public async Task RecoverStaleTasksAsync_WhenProcessingTaskHasNoLease_CancelsWithoutDeletingDocuments()
     {
         using var context = CreateContext();

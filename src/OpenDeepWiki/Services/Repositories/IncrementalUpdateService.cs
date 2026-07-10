@@ -346,6 +346,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                                    LocalGitWorktreeDirtyException or
                                    LocalGitSourceVersionChangedException or
                                    IncrementalBaselineConflictException or
+                                   IncrementalWikiPublishConflictException or
                                    IncrementalWikiDraftLimitExceededException)
         {
             throw;

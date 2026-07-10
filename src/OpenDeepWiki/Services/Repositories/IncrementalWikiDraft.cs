@@ -13,6 +13,10 @@ public sealed class IncrementalBaselineConflictException(string branchId, string
     : InvalidOperationException(
         $"Incremental baseline changed before publish. BranchId: {branchId}, Expected: {expectedBaseline ?? "<null>"}.");
 
+public sealed class IncrementalWikiPublishConflictException(string entityType, string entityId)
+    : InvalidOperationException(
+        $"Incremental wiki publish conflict: {entityType} '{entityId}' changed after the draft snapshot was read.");
+
 public sealed class LocalGitSourceVersionChangedException(string? expectedHead, string? actualHead)
     : InvalidOperationException(
         $"Local Git HEAD changed before publish. Expected: {expectedHead ?? "<null>"}, Actual: {actualHead ?? "<null>"}.");
@@ -85,11 +89,19 @@ public interface IIncrementalWikiDraft
 
 public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
 {
+    private enum DraftDocumentMutationKind
+    {
+        Write,
+        Append,
+        Edit
+    }
+
     private readonly IContext _readContext;
     private readonly long _maxBytes;
     private readonly Func<CancellationToken, Task> _earlyAbortCheck;
     private readonly Dictionary<string, LanguageDraft> _languages = [];
     private readonly Dictionary<string, (string Markdown, DateTime GeneratedAtUtc)> _skills = [];
+    private long _sizeBytes;
 
     public IncrementalWikiDraft(
         IContext readContext,
@@ -101,11 +113,16 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
         SourceHeadCommitId = sourceHeadCommitId;
         _maxBytes = Math.Max(1, maxBytes);
         _earlyAbortCheck = earlyAbortCheck;
+        _sizeBytes = Encoding.UTF8.GetByteCount(SourceHeadCommitId);
+        if (_sizeBytes > _maxBytes)
+        {
+            throw new IncrementalWikiDraftLimitExceededException(_maxBytes);
+        }
     }
 
     public string SourceHeadCommitId { get; }
 
-    public long SizeBytes => CalculateSizeBytes();
+    public long SizeBytes => _sizeBytes;
 
     public async Task<IReadOnlyList<DocCatalog>> GetCatalogsAsync(
         string branchLanguageId,
@@ -120,7 +137,6 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
                 catalog.DocFile = await GetDocumentAsync(language, catalog.DocFileId!, cancellationToken);
             }
 
-            EnsureWithinLimit();
         }
 
         return language.Catalogs.Values
@@ -138,7 +154,9 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
     {
         await _earlyAbortCheck(cancellationToken);
         var language = await GetLanguageAsync(branchLanguageId, cancellationToken);
-        var catalog = language.Catalogs.Values.FirstOrDefault(item =>
+        var projectedCatalogs = language.Catalogs.ToDictionary(item => item.Key, item => CloneCatalog(item.Value));
+        var projectedChanges = new HashSet<string>(language.ChangedCatalogIds);
+        var catalog = projectedCatalogs.Values.FirstOrDefault(item =>
             !item.IsDeleted && string.Equals(item.Path, path, StringComparison.Ordinal));
         if (catalog is null)
         {
@@ -152,21 +170,31 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             catalog.DocFileId = null;
         }
         catalog.UpdateTimestamp();
-        language.ChangedCatalogIds.Add(catalog.Id);
+        projectedChanges.Add(catalog.Id);
 
         if (updatedItem.Children.Count > 0)
         {
-            foreach (var child in language.Catalogs.Values.Where(item =>
+            foreach (var child in projectedCatalogs.Values.Where(item =>
                          !item.IsDeleted && item.ParentId == catalog.Id))
             {
                 child.MarkAsDeleted();
-                language.ChangedCatalogIds.Add(child.Id);
+                projectedChanges.Add(child.Id);
             }
 
-            AddOrRestoreCatalogItems(language, branchLanguageId, updatedItem.Children, catalog.Id);
+            AddOrRestoreCatalogItems(
+                projectedCatalogs,
+                projectedChanges,
+                branchLanguageId,
+                updatedItem.Children,
+                catalog.Id);
         }
 
-        EnsureWithinLimit();
+        var currentSize = language.Catalogs.Values.Sum(CatalogSizeBytes);
+        var projectedSize = projectedCatalogs.Values.Sum(CatalogSizeBytes);
+        EnsureCanGrow(projectedSize - currentSize);
+        language.Catalogs = projectedCatalogs;
+        language.ChangedCatalogIds = projectedChanges;
+        _sizeBytes += projectedSize - currentSize;
     }
 
     public Task<DraftDocumentMutationResult> WriteDocumentAsync(
@@ -179,14 +207,9 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             branchLanguageId,
             path,
             cancellationToken,
-            (document, _) =>
-            {
-                document.Content = content;
-                document.SourceFiles = sourceFiles;
-                return true;
-            },
-            createContent: content,
-            createSourceFiles: sourceFiles);
+            DraftDocumentMutationKind.Write,
+            content,
+            sourceFiles);
 
     public Task<DraftDocumentMutationResult> AppendDocumentAsync(
         string branchLanguageId,
@@ -198,17 +221,9 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             branchLanguageId,
             path,
             cancellationToken,
-            (document, _) =>
-            {
-                document.Content = string.Concat(document.Content, content);
-                if (sourceFiles is not null)
-                {
-                    document.SourceFiles = sourceFiles;
-                }
-                return true;
-            },
-            createContent: content,
-            createSourceFiles: sourceFiles);
+            DraftDocumentMutationKind.Append,
+            content,
+            sourceFiles);
 
     public Task<DraftDocumentMutationResult> EditDocumentAsync(
         string branchLanguageId,
@@ -220,17 +235,10 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             branchLanguageId,
             path,
             cancellationToken,
-            (document, _) =>
-            {
-                if (!document.Content.Contains(oldContent, StringComparison.Ordinal))
-                {
-                    return false;
-                }
-
-                document.Content = document.Content.Replace(oldContent, newContent, StringComparison.Ordinal);
-                return true;
-            },
-            allowCreate: false);
+            DraftDocumentMutationKind.Edit,
+            newContent,
+            sourceFiles: null,
+            oldContent);
 
     public async Task<string?> ReadDocumentAsync(
         string branchLanguageId,
@@ -245,7 +253,6 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
         }
 
         var document = await GetDocumentAsync(language, catalog.DocFileId, cancellationToken);
-        EnsureWithinLimit();
         return document?.Content;
     }
 
@@ -262,14 +269,18 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
         }
 
         var document = await GetDocumentAsync(language, catalog.DocFileId, cancellationToken);
-        EnsureWithinLimit();
         return document is { IsDeleted: false };
     }
 
     public void StageSkillMarkdown(string branchLanguageId, string markdown, DateTime generatedAtUtc)
     {
+        var previousSize = _skills.TryGetValue(branchLanguageId, out var previous)
+            ? SkillSizeBytes(previous.Markdown)
+            : 0;
+        var nextSize = SkillSizeBytes(markdown);
+        EnsureCanGrow(nextSize - previousSize);
         _skills[branchLanguageId] = (markdown, generatedAtUtc);
-        EnsureWithinLimit();
+        _sizeBytes += nextSize - previousSize;
     }
 
     public async Task ApplyAsync(IContext publishContext, CancellationToken cancellationToken = default)
@@ -279,52 +290,231 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             foreach (var catalogId in language.ChangedCatalogIds)
             {
                 var draftCatalog = language.Catalogs[catalogId];
-                var liveCatalog = await publishContext.DocCatalogs
-                    .FirstOrDefaultAsync(item => item.Id == catalogId, cancellationToken);
-                if (liveCatalog is null)
+                if (language.CatalogOriginalVersions.TryGetValue(catalogId, out var originalVersion))
                 {
-                    publishContext.DocCatalogs.Add(CloneCatalog(draftCatalog));
+                    if (!await UpdateCatalogWithCasAsync(
+                            publishContext,
+                            draftCatalog,
+                            originalVersion,
+                            cancellationToken))
+                    {
+                        throw new IncrementalWikiPublishConflictException(nameof(DocCatalog), catalogId);
+                    }
                 }
                 else
                 {
-                    CopyCatalog(draftCatalog, liveCatalog);
+                    if (await publishContext.DocCatalogs.AnyAsync(item => item.Id == catalogId, cancellationToken))
+                    {
+                        throw new IncrementalWikiPublishConflictException(nameof(DocCatalog), catalogId);
+                    }
+
+                    publishContext.DocCatalogs.Add(CloneCatalog(draftCatalog));
                 }
             }
 
             foreach (var documentId in language.ChangedDocumentIds)
             {
                 var draftDocument = language.Documents[documentId];
-                var liveDocument = await publishContext.DocFiles
-                    .FirstOrDefaultAsync(item => item.Id == documentId, cancellationToken);
-                if (liveDocument is null)
+                if (language.DocumentOriginalVersions.TryGetValue(documentId, out var originalVersion))
                 {
-                    publishContext.DocFiles.Add(CloneDocument(draftDocument));
+                    if (!await UpdateDocumentWithCasAsync(
+                            publishContext,
+                            draftDocument,
+                            originalVersion,
+                            cancellationToken))
+                    {
+                        throw new IncrementalWikiPublishConflictException(nameof(DocFile), documentId);
+                    }
                 }
                 else
                 {
-                    CopyDocument(draftDocument, liveDocument);
+                    if (await publishContext.DocFiles.AnyAsync(item => item.Id == documentId, cancellationToken))
+                    {
+                        throw new IncrementalWikiPublishConflictException(nameof(DocFile), documentId);
+                    }
+
+                    publishContext.DocFiles.Add(CloneDocument(draftDocument));
                 }
             }
         }
 
         foreach (var (languageId, skill) in _skills)
         {
-            var language = await publishContext.BranchLanguages
-                .FirstAsync(item => item.Id == languageId && !item.IsDeleted, cancellationToken);
-            language.SkillMarkdown = skill.Markdown;
-            language.SkillGeneratedAt = skill.GeneratedAtUtc;
-            language.UpdateTimestamp();
+            if (!_languages.TryGetValue(languageId, out var language) ||
+                !await UpdateSkillWithCasAsync(
+                    publishContext,
+                    languageId,
+                    skill,
+                    language.LanguageOriginalVersion,
+                    cancellationToken))
+            {
+                throw new IncrementalWikiPublishConflictException(nameof(BranchLanguage), languageId);
+            }
         }
     }
+
+    private static async Task<bool> UpdateCatalogWithCasAsync(
+        IContext context,
+        DocCatalog draft,
+        DraftRowVersion original,
+        CancellationToken cancellationToken)
+    {
+        if (context is not DbContext dbContext)
+        {
+            throw new InvalidOperationException("Draft publish requires an EF Core DbContext.");
+        }
+
+        if (IsInMemory(dbContext))
+        {
+            var live = await context.DocCatalogs.FirstOrDefaultAsync(item => item.Id == draft.Id, cancellationToken);
+            if (live is null || !Matches(live, original))
+            {
+                return false;
+            }
+
+            CopyCatalog(draft, live);
+            return true;
+        }
+
+        var updated = IsSqlite(dbContext)
+            ? await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "DocCatalogs"
+                SET "ParentId" = {draft.ParentId}, "Title" = {draft.Title}, "Path" = {draft.Path},
+                    "Order" = {draft.Order}, "DocFileId" = {draft.DocFileId},
+                    "UpdatedAt" = {draft.UpdatedAt}, "DeletedAt" = {draft.DeletedAt},
+                    "IsDeleted" = {draft.IsDeleted}
+                WHERE "Id" = {draft.Id}
+                  AND (("Version" = {original.Version}) OR ("Version" IS NULL AND {original.Version} IS NULL))
+                  AND (("UpdatedAt" = {original.UpdatedAt}) OR ("UpdatedAt" IS NULL AND {original.UpdatedAt} IS NULL))
+                """, cancellationToken)
+            : await context.DocCatalogs
+                .Where(item => item.Id == draft.Id &&
+                               item.Version == original.Version &&
+                               item.UpdatedAt == original.UpdatedAt)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.ParentId, draft.ParentId)
+                    .SetProperty(item => item.Title, draft.Title)
+                    .SetProperty(item => item.Path, draft.Path)
+                    .SetProperty(item => item.Order, draft.Order)
+                    .SetProperty(item => item.DocFileId, draft.DocFileId)
+                    .SetProperty(item => item.UpdatedAt, draft.UpdatedAt)
+                    .SetProperty(item => item.DeletedAt, draft.DeletedAt)
+                    .SetProperty(item => item.IsDeleted, draft.IsDeleted), cancellationToken);
+        return updated == 1;
+    }
+
+    private static async Task<bool> UpdateDocumentWithCasAsync(
+        IContext context,
+        DocFile draft,
+        DraftRowVersion original,
+        CancellationToken cancellationToken)
+    {
+        if (context is not DbContext dbContext)
+        {
+            throw new InvalidOperationException("Draft publish requires an EF Core DbContext.");
+        }
+
+        if (IsInMemory(dbContext))
+        {
+            var live = await context.DocFiles.FirstOrDefaultAsync(item => item.Id == draft.Id, cancellationToken);
+            if (live is null || !Matches(live, original))
+            {
+                return false;
+            }
+
+            CopyDocument(draft, live);
+            return true;
+        }
+
+        var updated = IsSqlite(dbContext)
+            ? await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "DocFiles"
+                SET "Content" = {draft.Content}, "SourceFiles" = {draft.SourceFiles},
+                    "UpdatedAt" = {draft.UpdatedAt}, "DeletedAt" = {draft.DeletedAt},
+                    "IsDeleted" = {draft.IsDeleted}
+                WHERE "Id" = {draft.Id}
+                  AND (("Version" = {original.Version}) OR ("Version" IS NULL AND {original.Version} IS NULL))
+                  AND (("UpdatedAt" = {original.UpdatedAt}) OR ("UpdatedAt" IS NULL AND {original.UpdatedAt} IS NULL))
+                """, cancellationToken)
+            : await context.DocFiles
+                .Where(item => item.Id == draft.Id &&
+                               item.Version == original.Version &&
+                               item.UpdatedAt == original.UpdatedAt)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.Content, draft.Content)
+                    .SetProperty(item => item.SourceFiles, draft.SourceFiles)
+                    .SetProperty(item => item.UpdatedAt, draft.UpdatedAt)
+                    .SetProperty(item => item.DeletedAt, draft.DeletedAt)
+                    .SetProperty(item => item.IsDeleted, draft.IsDeleted), cancellationToken);
+        return updated == 1;
+    }
+
+    private static async Task<bool> UpdateSkillWithCasAsync(
+        IContext context,
+        string languageId,
+        (string Markdown, DateTime GeneratedAtUtc) skill,
+        DraftRowVersion original,
+        CancellationToken cancellationToken)
+    {
+        if (context is not DbContext dbContext)
+        {
+            throw new InvalidOperationException("Draft publish requires an EF Core DbContext.");
+        }
+
+        var updatedAt = DateTime.UtcNow;
+        if (IsInMemory(dbContext))
+        {
+            var live = await context.BranchLanguages.FirstOrDefaultAsync(item => item.Id == languageId, cancellationToken);
+            if (live is null || !Matches(live, original))
+            {
+                return false;
+            }
+
+            live.SkillMarkdown = skill.Markdown;
+            live.SkillGeneratedAt = skill.GeneratedAtUtc;
+            live.UpdatedAt = updatedAt;
+            return true;
+        }
+
+        var updated = IsSqlite(dbContext)
+            ? await dbContext.Database.ExecuteSqlInterpolatedAsync($"""
+                UPDATE "BranchLanguages"
+                SET "SkillMarkdown" = {skill.Markdown}, "SkillGeneratedAt" = {skill.GeneratedAtUtc},
+                    "UpdatedAt" = {updatedAt}
+                WHERE "Id" = {languageId} AND "IsDeleted" = 0
+                  AND (("Version" = {original.Version}) OR ("Version" IS NULL AND {original.Version} IS NULL))
+                  AND (("UpdatedAt" = {original.UpdatedAt}) OR ("UpdatedAt" IS NULL AND {original.UpdatedAt} IS NULL))
+                """, cancellationToken)
+            : await context.BranchLanguages
+                .Where(item => item.Id == languageId && !item.IsDeleted &&
+                               item.Version == original.Version &&
+                               item.UpdatedAt == original.UpdatedAt)
+                .ExecuteUpdateAsync(setters => setters
+                    .SetProperty(item => item.SkillMarkdown, skill.Markdown)
+                    .SetProperty(item => item.SkillGeneratedAt, skill.GeneratedAtUtc)
+                    .SetProperty(item => item.UpdatedAt, updatedAt), cancellationToken);
+        return updated == 1;
+    }
+
+    private static bool Matches<T>(AggregateRoot<T> live, DraftRowVersion original) =>
+        live.UpdatedAt == original.UpdatedAt &&
+        ((live.Version is null && original.Version is null) ||
+         (live.Version is not null && original.Version is not null && live.Version.SequenceEqual(original.Version)));
+
+    private static bool IsInMemory(DbContext context) =>
+        context.Database.ProviderName?.Contains("InMemory", StringComparison.Ordinal) == true;
+
+    private static bool IsSqlite(DbContext context) =>
+        context.Database.ProviderName?.Contains("Sqlite", StringComparison.Ordinal) == true;
 
     private async Task<DraftDocumentMutationResult> MutateDocumentAsync(
         string branchLanguageId,
         string path,
         CancellationToken cancellationToken,
-        Func<DocFile, bool, bool> mutate,
-        bool allowCreate = true,
-        string? createContent = null,
-        string? createSourceFiles = null)
+        DraftDocumentMutationKind mutationKind,
+        string content,
+        string? sourceFiles,
+        string? oldContent = null)
     {
         await _earlyAbortCheck(cancellationToken);
         var language = await GetLanguageAsync(branchLanguageId, cancellationToken);
@@ -339,53 +529,127 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
         {
             if (catalog.DocFileId is not null)
             {
+                var delta = -Utf8Size(catalog.DocFileId);
+                EnsureCanGrow(delta);
                 catalog.DocFileId = null;
                 catalog.UpdateTimestamp();
                 language.ChangedCatalogIds.Add(catalog.Id);
-                EnsureWithinLimit();
+                _sizeBytes += delta;
             }
 
             return new DraftDocumentMutationResult(DraftDocumentMutationStatus.NavigationNode);
         }
 
         DocFile? document = null;
+        DraftRowVersion? loadedOriginalVersion = null;
+        var wasCached = false;
         if (catalog.DocFileId is not null)
         {
-            document = await GetDocumentAsync(language, catalog.DocFileId, cancellationToken);
+            wasCached = language.Documents.TryGetValue(catalog.DocFileId, out document);
+            if (!wasCached)
+            {
+                var loaded = await LoadDocumentSnapshotAsync(catalog.DocFileId, cancellationToken);
+                document = loaded.Document;
+                loadedOriginalVersion = loaded.OriginalVersion;
+            }
         }
 
         var created = false;
         if (document is null)
         {
-            if (!allowCreate)
+            if (mutationKind == DraftDocumentMutationKind.Edit)
             {
                 return new DraftDocumentMutationResult(DraftDocumentMutationStatus.DocumentNotFound);
             }
 
-            document = new DocFile
+            var documentId = Guid.NewGuid().ToString();
+            var newDocument = new DocFile
             {
-                Id = Guid.NewGuid().ToString(),
+                Id = documentId,
                 BranchLanguageId = branchLanguageId,
-                Content = createContent ?? string.Empty,
-                SourceFiles = createSourceFiles
+                Content = content,
+                SourceFiles = sourceFiles
             };
+            var delta = DocumentSizeBytes(newDocument) + Utf8Size(documentId) - Utf8Size(catalog.DocFileId);
+            EnsureCanGrow(delta);
+            document = newDocument;
             language.Documents[document.Id] = document;
             catalog.DocFileId = document.Id;
             catalog.UpdateTimestamp();
             language.ChangedCatalogIds.Add(catalog.Id);
+            _sizeBytes += delta;
             created = true;
         }
-        else if (!mutate(document, false))
+        else
         {
-            return new DraftDocumentMutationResult(DraftDocumentMutationStatus.OldContentNotFound);
+            long delta;
+            var currentDocumentSize = wasCached ? DocumentSizeBytes(document) : 0;
+            switch (mutationKind)
+            {
+                case DraftDocumentMutationKind.Write:
+                    delta = wasCached
+                        ? Utf8Size(content) - Utf8Size(document.Content) +
+                          Utf8Size(sourceFiles) - Utf8Size(document.SourceFiles)
+                        : Utf8Size(document.Id) + Utf8Size(content) + Utf8Size(sourceFiles) + 64L;
+                    EnsureCanGrow(delta);
+                    document.Content = content;
+                    document.SourceFiles = sourceFiles;
+                    break;
+                case DraftDocumentMutationKind.Append:
+                    delta = Utf8Size(content) +
+                            (sourceFiles is null ? 0 : Utf8Size(sourceFiles) - Utf8Size(document.SourceFiles)) +
+                            (wasCached ? 0 : DocumentSizeBytes(document));
+                    EnsureCanGrow(delta);
+                    document.Content = string.Concat(document.Content, content);
+                    if (sourceFiles is not null)
+                    {
+                        document.SourceFiles = sourceFiles;
+                    }
+                    break;
+                case DraftDocumentMutationKind.Edit:
+                    if (oldContent is null || !document.Content.Contains(oldContent, StringComparison.Ordinal))
+                    {
+                        return new DraftDocumentMutationResult(DraftDocumentMutationStatus.OldContentNotFound);
+                    }
+
+                    var replacementCount = CountOccurrences(document.Content, oldContent);
+                    delta = (long)replacementCount * (Utf8Size(content) - Utf8Size(oldContent)) +
+                            (wasCached ? 0 : currentDocumentSize);
+                    EnsureCanGrow(delta);
+                    document.Content = document.Content.Replace(oldContent, content, StringComparison.Ordinal);
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException(nameof(mutationKind));
+            }
+
+            _sizeBytes += delta;
+            if (!wasCached)
+            {
+                language.Documents.Add(document.Id, document);
+                language.DocumentOriginalVersions.Add(
+                    document.Id,
+                    loadedOriginalVersion ?? throw new InvalidOperationException("Loaded document version is missing."));
+            }
         }
 
         document.UpdateTimestamp();
         language.ChangedDocumentIds.Add(document.Id);
-        EnsureWithinLimit();
         return new DraftDocumentMutationResult(
             created ? DraftDocumentMutationStatus.Created : DraftDocumentMutationStatus.Updated,
             document.Content.Length);
+    }
+
+    private static int CountOccurrences(string content, string value)
+    {
+        var count = 0;
+        var offset = 0;
+        while ((offset = content.IndexOf(value, offset, StringComparison.Ordinal)) >= 0)
+        {
+            count++;
+            offset += value.Length;
+        }
+
+        return count;
     }
 
     private async Task<LanguageDraft> GetLanguageAsync(string branchLanguageId, CancellationToken cancellationToken)
@@ -395,14 +659,87 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             return existing;
         }
 
-        var catalogs = await _readContext.DocCatalogs
+        var liveLanguageVersion = await _readContext.BranchLanguages
+            .AsNoTracking()
+            .Where(item => item.Id == branchLanguageId && !item.IsDeleted)
+            .Select(item => new DraftRowVersion(item.Version, item.UpdatedAt))
+            .FirstAsync(cancellationToken);
+        var catalogQuery = _readContext.DocCatalogs
+            .AsNoTracking()
+            .Where(item => item.BranchLanguageId == branchLanguageId);
+        var storedCatalogSize = await GetStoredCatalogSizeAsync(branchLanguageId, cancellationToken);
+        if (storedCatalogSize > _maxBytes - _sizeBytes)
+        {
+            throw new IncrementalWikiDraftLimitExceededException(_maxBytes);
+        }
+
+        var catalogs = await catalogQuery.ToListAsync(cancellationToken);
+        var catalogClones = catalogs.ToDictionary(item => item.Id, CloneCatalog);
+        var delta = catalogClones.Values.Sum(CatalogSizeBytes);
+        EnsureCanGrow(delta);
+        var language = new LanguageDraft(
+            catalogClones,
+            catalogs.ToDictionary(item => item.Id, item => DraftRowVersion.From(item)),
+            liveLanguageVersion with { Version = liveLanguageVersion.Version?.ToArray() });
+        _languages.Add(branchLanguageId, language);
+        _sizeBytes += delta;
+        return language;
+    }
+
+    private async Task<long> GetStoredCatalogSizeAsync(
+        string branchLanguageId,
+        CancellationToken cancellationToken)
+    {
+        if (_readContext is not DbContext dbContext || IsInMemory(dbContext))
+        {
+            var snapshots = await _readContext.DocCatalogs
+                .AsNoTracking()
+                .Where(item => item.BranchLanguageId == branchLanguageId)
+                .Select(item => new { item.Id, item.ParentId, item.Title, item.Path, item.DocFileId })
+                .ToListAsync(cancellationToken);
+            return snapshots.Sum(item =>
+                Utf8Size(item.Id) + Utf8Size(item.ParentId) + Utf8Size(item.Title) +
+                Utf8Size(item.Path) + Utf8Size(item.DocFileId) + 64L);
+        }
+
+        if (IsSqlite(dbContext))
+        {
+            return await dbContext.Database.SqlQuery<long>($"""
+                    SELECT COALESCE(SUM(
+                        COALESCE(length(CAST("Id" AS BLOB)), 0) +
+                        COALESCE(length(CAST("ParentId" AS BLOB)), 0) +
+                        COALESCE(length(CAST("Title" AS BLOB)), 0) +
+                        COALESCE(length(CAST("Path" AS BLOB)), 0) +
+                        COALESCE(length(CAST("DocFileId" AS BLOB)), 0) + 64), 0) AS "Value"
+                    FROM "DocCatalogs"
+                    WHERE "BranchLanguageId" = {branchLanguageId}
+                    """)
+                .SingleAsync(cancellationToken);
+        }
+
+        if (dbContext.Database.ProviderName?.Contains("Npgsql", StringComparison.Ordinal) == true)
+        {
+            return await dbContext.Database.SqlQuery<long>($"""
+                    SELECT COALESCE(SUM(
+                        COALESCE(octet_length("Id"), 0) +
+                        COALESCE(octet_length("ParentId"), 0) +
+                        COALESCE(octet_length("Title"), 0) +
+                        COALESCE(octet_length("Path"), 0) +
+                        COALESCE(octet_length("DocFileId"), 0) + 64), 0)::bigint AS "Value"
+                    FROM "DocCatalogs"
+                    WHERE "BranchLanguageId" = {branchLanguageId}
+                    """)
+                .SingleAsync(cancellationToken);
+        }
+
+        return await _readContext.DocCatalogs
             .AsNoTracking()
             .Where(item => item.BranchLanguageId == branchLanguageId)
-            .ToListAsync(cancellationToken);
-        var language = new LanguageDraft(catalogs.ToDictionary(item => item.Id, CloneCatalog));
-        _languages.Add(branchLanguageId, language);
-        EnsureWithinLimit();
-        return language;
+            .SumAsync(item =>
+                (long)item.Id.Length + item.Title.Length + item.Path.Length +
+                (item.ParentId == null ? 0 : item.ParentId.Length) +
+                (item.DocFileId == null ? 0 : item.DocFileId.Length) + 64L,
+                cancellationToken);
     }
 
     private async Task<DocFile?> GetDocumentAsync(
@@ -415,17 +752,96 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
             return cached.IsDeleted ? null : cached;
         }
 
+        var loaded = await LoadDocumentSnapshotAsync(documentId, cancellationToken);
+        if (loaded.Document is null)
+        {
+            return null;
+        }
+
+        var delta = DocumentSizeBytes(loaded.Document);
+        EnsureCanGrow(delta);
+        language.Documents.Add(documentId, loaded.Document);
+        language.DocumentOriginalVersions.Add(
+            documentId,
+            loaded.OriginalVersion ?? throw new InvalidOperationException("Loaded document version is missing."));
+        _sizeBytes += delta;
+        return loaded.Document;
+    }
+
+    private async Task<(DocFile? Document, DraftRowVersion? OriginalVersion)> LoadDocumentSnapshotAsync(
+        string documentId,
+        CancellationToken cancellationToken)
+    {
+        var remainingBytes = _maxBytes - _sizeBytes;
+        var storedSize = await GetStoredDocumentSizeAsync(documentId, cancellationToken);
+        if (storedSize > remainingBytes)
+        {
+            throw new IncrementalWikiDraftLimitExceededException(_maxBytes);
+        }
+
         var liveDocument = await _readContext.DocFiles
             .AsNoTracking()
             .FirstOrDefaultAsync(item => item.Id == documentId && !item.IsDeleted, cancellationToken);
         if (liveDocument is null)
         {
-            return null;
+            return (null, null);
         }
 
         var clone = CloneDocument(liveDocument);
-        language.Documents.Add(documentId, clone);
-        return clone;
+        var delta = DocumentSizeBytes(clone);
+        EnsureCanGrow(delta);
+        return (clone, DraftRowVersion.From(liveDocument));
+    }
+
+    private async Task<long> GetStoredDocumentSizeAsync(
+        string documentId,
+        CancellationToken cancellationToken)
+    {
+        if (_readContext is not DbContext dbContext || IsInMemory(dbContext))
+        {
+            var snapshot = await _readContext.DocFiles
+                .AsNoTracking()
+                .Where(item => item.Id == documentId && !item.IsDeleted)
+                .Select(item => new { item.Id, item.Content, item.SourceFiles })
+                .FirstOrDefaultAsync(cancellationToken);
+            return snapshot is null
+                ? 0
+                : Utf8Size(snapshot.Id) + Utf8Size(snapshot.Content) + Utf8Size(snapshot.SourceFiles) + 64L;
+        }
+
+        if (IsSqlite(dbContext))
+        {
+            return await dbContext.Database.SqlQuery<long>($"""
+                    SELECT COALESCE(length(CAST("Id" AS BLOB)), 0) +
+                           COALESCE(length(CAST("Content" AS BLOB)), 0) +
+                           COALESCE(length(CAST("SourceFiles" AS BLOB)), 0) + 64 AS "Value"
+                    FROM "DocFiles"
+                    WHERE "Id" = {documentId} AND "IsDeleted" = 0
+                    LIMIT 1
+                    """)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
+        if (dbContext.Database.ProviderName?.Contains("Npgsql", StringComparison.Ordinal) == true)
+        {
+            return await dbContext.Database.SqlQuery<long>($"""
+                    SELECT COALESCE(octet_length("Id"), 0) +
+                           COALESCE(octet_length("Content"), 0) +
+                           COALESCE(octet_length("SourceFiles"), 0) + 64 AS "Value"
+                    FROM "DocFiles"
+                    WHERE "Id" = {documentId} AND NOT "IsDeleted"
+                    LIMIT 1
+                    """)
+                .FirstOrDefaultAsync(cancellationToken);
+        }
+
+        var minimumCharacterCount = await _readContext.DocFiles
+            .AsNoTracking()
+            .Where(item => item.Id == documentId && !item.IsDeleted)
+            .Select(item => (long)item.Id.Length + item.Content.Length +
+                            (item.SourceFiles == null ? 0 : item.SourceFiles.Length) + 64L)
+            .FirstOrDefaultAsync(cancellationToken);
+        return minimumCharacterCount;
     }
 
     private static DocCatalog? FindLeafCatalog(LanguageDraft language, string path)
@@ -438,14 +854,15 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
     }
 
     private static void AddOrRestoreCatalogItems(
-        LanguageDraft language,
+        Dictionary<string, DocCatalog> catalogs,
+        HashSet<string> changedCatalogIds,
         string branchLanguageId,
         IEnumerable<CatalogItem> items,
         string? parentId)
     {
         foreach (var item in items)
         {
-            var catalog = language.Catalogs.Values.FirstOrDefault(existing =>
+            var catalog = catalogs.Values.FirstOrDefault(existing =>
                 string.Equals(existing.Path, item.Path, StringComparison.Ordinal));
             if (catalog is null)
             {
@@ -455,7 +872,7 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
                     BranchLanguageId = branchLanguageId,
                     Path = item.Path
                 };
-                language.Catalogs.Add(catalog.Id, catalog);
+                catalogs.Add(catalog.Id, catalog);
             }
 
             catalog.ParentId = parentId;
@@ -468,44 +885,33 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
                 catalog.DocFileId = null;
             }
             catalog.UpdateTimestamp();
-            language.ChangedCatalogIds.Add(catalog.Id);
+            changedCatalogIds.Add(catalog.Id);
 
-            AddOrRestoreCatalogItems(language, branchLanguageId, item.Children, catalog.Id);
+            AddOrRestoreCatalogItems(
+                catalogs,
+                changedCatalogIds,
+                branchLanguageId,
+                item.Children,
+                catalog.Id);
         }
     }
 
-    private long CalculateSizeBytes()
+    private void EnsureCanGrow(long deltaBytes)
     {
-        long size = Encoding.UTF8.GetByteCount(SourceHeadCommitId);
-        foreach (var language in _languages.Values)
-        {
-            foreach (var catalog in language.Catalogs.Values)
-            {
-                size += Utf8Size(catalog.Id) + Utf8Size(catalog.ParentId) + Utf8Size(catalog.Title) +
-                        Utf8Size(catalog.Path) + Utf8Size(catalog.DocFileId) + 64;
-            }
-
-            foreach (var document in language.Documents.Values)
-            {
-                size += Utf8Size(document.Id) + Utf8Size(document.Content) + Utf8Size(document.SourceFiles) + 64;
-            }
-        }
-
-        foreach (var skill in _skills.Values)
-        {
-            size += Utf8Size(skill.Markdown) + 32;
-        }
-
-        return size;
-    }
-
-    private void EnsureWithinLimit()
-    {
-        if (CalculateSizeBytes() > _maxBytes)
+        if (deltaBytes > 0 && _sizeBytes > _maxBytes - deltaBytes)
         {
             throw new IncrementalWikiDraftLimitExceededException(_maxBytes);
         }
     }
+
+    private static long CatalogSizeBytes(DocCatalog catalog) =>
+        Utf8Size(catalog.Id) + Utf8Size(catalog.ParentId) + Utf8Size(catalog.Title) +
+        Utf8Size(catalog.Path) + Utf8Size(catalog.DocFileId) + 64L;
+
+    private static long DocumentSizeBytes(DocFile document) =>
+        Utf8Size(document.Id) + Utf8Size(document.Content) + Utf8Size(document.SourceFiles) + 64L;
+
+    private static long SkillSizeBytes(string markdown) => Utf8Size(markdown) + 32L;
 
     private static int Utf8Size(string? value) => value is null ? 0 : Encoding.UTF8.GetByteCount(value);
 
@@ -566,11 +972,23 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
         target.IsDeleted = source.IsDeleted;
     }
 
-    private sealed class LanguageDraft(Dictionary<string, DocCatalog> catalogs)
+    private sealed class LanguageDraft(
+        Dictionary<string, DocCatalog> catalogs,
+        Dictionary<string, DraftRowVersion> catalogOriginalVersions,
+        DraftRowVersion languageOriginalVersion)
     {
-        public Dictionary<string, DocCatalog> Catalogs { get; } = catalogs;
+        public Dictionary<string, DocCatalog> Catalogs { get; set; } = catalogs;
+        public Dictionary<string, DraftRowVersion> CatalogOriginalVersions { get; } = catalogOriginalVersions;
         public Dictionary<string, DocFile> Documents { get; } = [];
-        public HashSet<string> ChangedCatalogIds { get; } = [];
+        public Dictionary<string, DraftRowVersion> DocumentOriginalVersions { get; } = [];
+        public DraftRowVersion LanguageOriginalVersion { get; } = languageOriginalVersion;
+        public HashSet<string> ChangedCatalogIds { get; set; } = [];
         public HashSet<string> ChangedDocumentIds { get; } = [];
+    }
+
+    private sealed record DraftRowVersion(byte[]? Version, DateTime? UpdatedAt)
+    {
+        public static DraftRowVersion From<T>(AggregateRoot<T> entity) =>
+            new(entity.Version?.ToArray(), entity.UpdatedAt);
     }
 }

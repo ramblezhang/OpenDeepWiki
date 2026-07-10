@@ -185,6 +185,86 @@ public class IncrementalWikiDraftPublisherTests
         File.Delete(databasePath);
     }
 
+    [Theory]
+    [InlineData("doc")]
+    [InlineData("catalog")]
+    [InlineData("skill")]
+    public async Task ConcurrentLiveEdit_RejectsPublishAndRollsBackEveryDraftChange(string conflictTarget)
+    {
+        SqliteTestSupport.EnsureInitialized();
+        var databasePath = Path.Combine(Path.GetTempPath(), $"opendeepwiki-draft-conflict-{Guid.NewGuid():N}.db");
+        var options = new DbContextOptionsBuilder<TestDbContext>()
+            .UseSqlite($"Data Source={databasePath};Default Timeout=5")
+            .Options;
+        string repositoryId;
+        string branchId;
+        GenerationLeaseHandle lease;
+
+        await using (var context = new TestDbContext(options))
+        {
+            await context.Database.EnsureCreatedAsync();
+            var state = await SeedAsync(context);
+            repositoryId = state.Repository.Id;
+            branchId = state.Branch.Id;
+            lease = state.Lease;
+            var draft = await CreateDraftWithDocumentAsync(context, state);
+            await draft.UpdateCatalogNodeAsync(
+                state.Language.Id,
+                "page",
+                new CatalogItem { Title = "draft-title", Path = "page", Order = 2 });
+            draft.StageSkillMarkdown(state.Language.Id, "draft-skill", DateTime.UtcNow);
+
+            await using (var concurrent = new TestDbContext(options))
+            {
+                var concurrentVersion = new byte[] { 9, 8, 7, 6 };
+                switch (conflictTarget)
+                {
+                    case "doc":
+                        await concurrent.Database.ExecuteSqlInterpolatedAsync($"""
+                            UPDATE "DocFiles" SET "Content" = {"manual-doc"}, "Version" = {concurrentVersion}
+                            WHERE "BranchLanguageId" = {state.Language.Id}
+                            """);
+                        break;
+                    case "catalog":
+                        await concurrent.Database.ExecuteSqlInterpolatedAsync($"""
+                            UPDATE "DocCatalogs" SET "Title" = {"manual-title"}, "Version" = {concurrentVersion}
+                            WHERE "BranchLanguageId" = {state.Language.Id}
+                            """);
+                        break;
+                    case "skill":
+                        await concurrent.Database.ExecuteSqlInterpolatedAsync($"""
+                            UPDATE "BranchLanguages" SET "SkillMarkdown" = {"manual-skill"}, "Version" = {concurrentVersion}
+                            WHERE "Id" = {state.Language.Id}
+                            """);
+                        break;
+                }
+            }
+
+            var analyzer = CleanAnalyzer(state.Repository, OldHead);
+            await Assert.ThrowsAsync<IncrementalWikiPublishConflictException>(() =>
+                CreatePublisher(context, analyzer.Object).PublishAsync(
+                    draft,
+                    repositoryId,
+                    branchId,
+                    OldHead,
+                    NewHead,
+                    lease));
+        }
+
+        await using (var verification = new TestDbContext(options))
+        {
+            await AssertLiveStateAsync(
+                verification,
+                conflictTarget == "doc" ? "manual-doc" : "live-doc",
+                conflictTarget == "catalog" ? "manual-title" : "Live title",
+                conflictTarget == "skill" ? "manual-skill" : "live-skill",
+                OldHead,
+                IncrementalUpdateStatus.Processing);
+        }
+
+        File.Delete(databasePath);
+    }
+
     [Fact]
     public async Task OldTokenAndBaselineCasBothRejectBeforeApplyingDraft()
     {
@@ -225,14 +305,61 @@ public class IncrementalWikiDraftPublisherTests
     {
         await using var context = CreateInMemoryContext();
         var state = await SeedAsync(context);
-        var draft = new IncrementalWikiDraft(context, OldHead, 1024, _ => Task.CompletedTask);
+        var largeDocument = new DocFile
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = state.Language.Id,
+            Content = new string('界', 800)
+        };
+        context.DocFiles.Add(largeDocument);
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = state.Language.Id,
+            Title = "Large",
+            Path = "large",
+            Order = 2,
+            DocFileId = largeDocument.Id
+        });
+        await context.SaveChangesAsync();
+
+        var freshDraft = new IncrementalWikiDraft(context, OldHead, 2048, _ => Task.CompletedTask);
+        await freshDraft.GetCatalogsAsync(state.Language.Id, includeDocuments: false);
+        var freshDraftSize = freshDraft.SizeBytes;
+        var freshDocTool = new DocTool(context, state.Language.Id, "page", draft: freshDraft);
+        await Assert.ThrowsAsync<IncrementalWikiDraftLimitExceededException>(
+            () => freshDocTool.WriteAsync(new string('x', 4096)));
+        Assert.Equal(freshDraftSize, freshDraft.SizeBytes);
+        await Assert.ThrowsAsync<IncrementalWikiDraftLimitExceededException>(
+            () => freshDocTool.AppendAsync(new string('y', 4096)));
+        Assert.Equal(freshDraftSize, freshDraft.SizeBytes);
+
+        var draft = new IncrementalWikiDraft(context, OldHead, 2048, _ => Task.CompletedTask);
         var docTool = new DocTool(context, state.Language.Id, "page", draft: draft);
+        Assert.Equal("live-doc", await docTool.ReadAsync());
+        var sizeBeforeRejectedMutation = draft.SizeBytes;
 
         await Assert.ThrowsAsync<IncrementalWikiDraftLimitExceededException>(
             () => docTool.WriteAsync(new string('x', 4096)));
+        Assert.Equal(sizeBeforeRejectedMutation, draft.SizeBytes);
+        Assert.Equal("live-doc", await docTool.ReadAsync());
+
+        await Assert.ThrowsAsync<IncrementalWikiDraftLimitExceededException>(
+            () => docTool.AppendAsync(new string('y', 4096)));
+        Assert.Equal(sizeBeforeRejectedMutation, draft.SizeBytes);
+        Assert.Equal("live-doc", await docTool.ReadAsync());
+
+        await Assert.ThrowsAsync<IncrementalWikiDraftLimitExceededException>(() => Task.Run(() =>
+            draft.StageSkillMarkdown(state.Language.Id, new string('s', 4096), DateTime.UtcNow)));
+        Assert.Equal(sizeBeforeRejectedMutation, draft.SizeBytes);
+
+        await Assert.ThrowsAsync<IncrementalWikiDraftLimitExceededException>(
+            () => draft.ReadDocumentAsync(state.Language.Id, "large"));
+        Assert.Equal(sizeBeforeRejectedMutation, draft.SizeBytes);
 
         context.ChangeTracker.Clear();
-        Assert.Equal("live-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Contains(await context.DocFiles.ToListAsync(), item => item.Content == "live-doc");
+        Assert.Contains(await context.DocFiles.ToListAsync(), item => item.Content == new string('界', 800));
         Assert.Equal(OldHead, (await context.RepositoryBranches.SingleAsync()).LastCommitId);
     }
 

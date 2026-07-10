@@ -229,7 +229,8 @@ public class IncrementalUpdateWorker : BackgroundService
             }
         }
         catch (Exception ex) when (ex is LocalGitSourceVersionChangedException or
-                                   IncrementalBaselineConflictException)
+                                   IncrementalBaselineConflictException or
+                                   IncrementalWikiPublishConflictException)
         {
             if (lease is not null)
             {
