@@ -60,4 +60,9 @@ public class IncrementalUpdateOptions
     /// Interval between incremental generation lease heartbeats.
     /// </summary>
     public int LeaseHeartbeatIntervalSeconds { get; set; } = 30;
+
+    /// <summary>
+    /// Maximum in-memory size of a local-Git incremental wiki draft.
+    /// </summary>
+    public long DraftMaxBytes { get; set; } = 32 * 1024 * 1024;
 }

@@ -354,6 +354,113 @@ public class IncrementalUpdateWorkerTests
     }
 
     [Fact]
+    public async Task ProcessSingleTaskAsync_WhenSourceBecomesDirtyAfterFirstDraftWrite_CancelsAndKeepsLiveWiki()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            updateIntervalMinutes: 60,
+            lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath("/tmp/draft-source"));
+        var branch = SeedBranch(context, repository.Id, "main", GitCommitA);
+        var language = new BranchLanguage
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryBranchId = branch.Id,
+            LanguageCode = "zh",
+            IsDefault = true,
+            SkillMarkdown = "live-skill"
+        };
+        var document = new DocFile
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Content = "live-doc"
+        };
+        context.BranchLanguages.Add(language);
+        context.DocFiles.Add(document);
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Title = "Live",
+            Path = "page",
+            DocFileId = document.Id
+        });
+        var task = new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            Status = IncrementalUpdateStatus.Pending,
+            CreatedAt = DateTime.UtcNow
+        };
+        context.IncrementalUpdateTasks.Add(task);
+        await context.SaveChangesAsync();
+
+        var clean = new LocalGitPreflightResult(true, GitCommitA, [], [], []);
+        var dirty = new LocalGitPreflightResult(true, GitCommitA, [], [], ["dirty.txt"]);
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(item => item.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(clean);
+        var updateService = new Mock<IIncrementalUpdateService>(MockBehavior.Strict);
+        updateService
+            .Setup(item => item.ProcessIncrementalUpdateAsync(
+                repository.Id,
+                branch.Id,
+                It.IsAny<CancellationToken>(),
+                It.IsAny<GenerationLeaseHandle?>()))
+            .Returns(async () =>
+            {
+                var becameDirty = false;
+                var draft = new IncrementalWikiDraft(
+                    context,
+                    GitCommitA,
+                    1024 * 1024,
+                    _ => becameDirty
+                        ? Task.FromException(new LocalGitWorktreeDirtyException(dirty))
+                        : Task.CompletedTask);
+                var firstWrite = await draft.WriteDocumentAsync(
+                    language.Id,
+                    "page",
+                    "draft-first-write",
+                    null);
+                Assert.Equal(DraftDocumentMutationStatus.Updated, firstWrite.Status);
+                becameDirty = true;
+                await draft.AppendDocumentAsync(language.Id, "page", "second-write", null);
+                return new IncrementalUpdateResult { Success = true };
+            });
+
+        var services = new ServiceCollection();
+        services.AddSingleton<IContext>(context);
+        services.AddScoped<IRepositoryGenerationLockService, RepositoryGenerationLockService>();
+        await using var provider = services.BuildServiceProvider();
+        var worker = new IncrementalUpdateWorker(
+            provider.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<IncrementalUpdateWorker>.Instance,
+            Options.Create(new IncrementalUpdateOptions()));
+
+        await InvokeProcessSingleTaskAsync(
+            worker,
+            context,
+            updateService.Object,
+            new RepositoryGenerationLockService(context),
+            task,
+            analyzer.Object);
+
+        context.ChangeTracker.Clear();
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, (await context.IncrementalUpdateTasks.SingleAsync()).Status);
+        Assert.Equal("live-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Equal("Live", (await context.DocCatalogs.SingleAsync()).Title);
+        Assert.Equal("live-skill", (await context.BranchLanguages.SingleAsync()).SkillMarkdown);
+        Assert.Equal(GitCommitA, (await context.RepositoryBranches.SingleAsync()).LastCommitId);
+        Assert.Empty(await context.RepositoryGenerationLocks.ToListAsync());
+        analyzer.VerifyAll();
+        updateService.VerifyAll();
+    }
+
+    [Fact]
     public async Task RecoverStaleTasksAsync_WhenProcessingTaskHasNoLease_CancelsWithoutDeletingDocuments()
     {
         using var context = CreateContext();
@@ -392,6 +499,63 @@ public class IncrementalUpdateWorkerTests
         Assert.Single(await context.DocFiles.ToListAsync());
         Assert.Single(await context.DocCatalogs.ToListAsync());
         Assert.Equal(GitCommitA, branch.LastCommitId);
+    }
+
+    [Fact]
+    public async Task RecoverStaleTasksAsync_AfterDraftProcessCrash_DiscardsOverlayAndPreservesLiveWiki()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, 60, DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", GitCommitA);
+        var language = new BranchLanguage
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryBranchId = branch.Id,
+            LanguageCode = "zh",
+            IsDefault = true,
+            SkillMarkdown = "live-skill"
+        };
+        var document = new DocFile
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Content = "live-doc"
+        };
+        context.BranchLanguages.Add(language);
+        context.DocFiles.Add(document);
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Title = "Live",
+            Path = "page",
+            DocFileId = document.Id
+        });
+        var task = SeedProcessingTask(context, repository.Id, branch.Id, DateTime.UtcNow.AddHours(-2));
+        await context.SaveChangesAsync();
+
+        var abandonedDraft = new IncrementalWikiDraft(
+            context,
+            GitCommitA,
+            1024 * 1024,
+            _ => Task.CompletedTask);
+        var draftWrite = await abandonedDraft.WriteDocumentAsync(
+            language.Id,
+            "page",
+            "draft-that-never-published",
+            null);
+        Assert.Equal(DraftDocumentMutationStatus.Updated, draftWrite.Status);
+        Assert.Equal("draft-that-never-published", await abandonedDraft.ReadDocumentAsync(language.Id, "page"));
+
+        await InvokeRecoverStaleTasksAsync(CreateWorker(), context);
+
+        context.ChangeTracker.Clear();
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, (await context.IncrementalUpdateTasks.SingleAsync()).Status);
+        Assert.Contains("no active generation lease", (await context.IncrementalUpdateTasks.SingleAsync()).ErrorMessage);
+        Assert.Equal("live-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Equal("Live", (await context.DocCatalogs.SingleAsync()).Title);
+        Assert.Equal("live-skill", (await context.BranchLanguages.SingleAsync()).SkillMarkdown);
+        Assert.Equal(GitCommitA, (await context.RepositoryBranches.SingleAsync()).LastCommitId);
     }
 
     [Fact]

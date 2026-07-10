@@ -20,6 +20,12 @@ public interface IGenerationWriteGuard
         IContext context,
         GenerationLeaseHandle lease,
         CancellationToken cancellationToken = default);
+
+    Task ExecuteAsync(
+        IContext context,
+        GenerationLeaseHandle lease,
+        Func<CancellationToken, Task> operation,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed class GenerationWriteGuard(IOptions<IncrementalUpdateOptions> options) : IGenerationWriteGuard
@@ -29,6 +35,13 @@ public sealed class GenerationWriteGuard(IOptions<IncrementalUpdateOptions> opti
     public async Task SaveChangesAsync(
         IContext context,
         GenerationLeaseHandle lease,
+        CancellationToken cancellationToken = default) =>
+        await ExecuteAsync(context, lease, _ => Task.CompletedTask, cancellationToken);
+
+    public async Task ExecuteAsync(
+        IContext context,
+        GenerationLeaseHandle lease,
+        Func<CancellationToken, Task> operation,
         CancellationToken cancellationToken = default)
     {
         if (context is not DbContext dbContext)
@@ -58,8 +71,17 @@ public sealed class GenerationWriteGuard(IOptions<IncrementalUpdateOptions> opti
                 throw new GenerationLeaseLostException(lease.LockId);
             }
 
-            inMemoryLease.UpdatedAt = DateTime.UtcNow;
-            await context.SaveChangesAsync(cancellationToken);
+            try
+            {
+                await operation(cancellationToken);
+                inMemoryLease.UpdatedAt = DateTime.UtcNow;
+                await context.SaveChangesAsync(cancellationToken);
+            }
+            catch
+            {
+                dbContext.ChangeTracker.Clear();
+                throw;
+            }
             return;
         }
 
@@ -96,8 +118,18 @@ public sealed class GenerationWriteGuard(IOptions<IncrementalUpdateOptions> opti
             throw new GenerationLeaseLostException(lease.LockId);
         }
 
-        await context.SaveChangesAsync(cancellationToken);
-        await transaction.CommitAsync(cancellationToken);
+        try
+        {
+            await operation(cancellationToken);
+            await context.SaveChangesAsync(cancellationToken);
+            await transaction.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await transaction.RollbackAsync(CancellationToken.None);
+            dbContext.ChangeTracker.Clear();
+            throw;
+        }
     }
 
     private bool IsExpired(RepositoryGenerationLock lease, DateTime now)

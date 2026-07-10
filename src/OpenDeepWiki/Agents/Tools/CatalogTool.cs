@@ -101,6 +101,12 @@ JSON Format:
         {
             throw;
         }
+        catch (Exception ex) when (ex is LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalWikiDraftLimitExceededException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return $"ERROR: Failed to validate catalog: {ex.Message}";
@@ -112,6 +118,12 @@ JSON Format:
             return "SUCCESS: Catalog has been written successfully.";
         }
         catch (GenerationLeaseLostException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalWikiDraftLimitExceededException)
         {
             throw;
         }
@@ -184,6 +196,12 @@ nodeJson: {""title"": ""Updated Title"", ""path"": ""1-overview"", ""order"": 1,
             return $"SUCCESS: Catalog node '{path}' has been updated successfully.";
         }
         catch (GenerationLeaseLostException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalWikiDraftLimitExceededException)
         {
             throw;
         }

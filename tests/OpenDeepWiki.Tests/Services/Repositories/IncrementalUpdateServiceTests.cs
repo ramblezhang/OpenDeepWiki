@@ -182,6 +182,133 @@ public class IncrementalUpdateServiceTests
         notificationService.VerifyAll();
     }
 
+    [Fact]
+    public async Task ProcessIncrementalUpdateAsync_LocalGitWithLease_PublishesDraftAtomically()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            generateSkill: false,
+            RepositorySource.EncodeLocalDirectoryPath("/tmp/local-git-draft"));
+        var branch = SeedBranch(context, repository.Id, "main", "old-sha");
+        var language = SeedBranchLanguage(context, branch.Id, "zh");
+        var document = new DocFile
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Content = "live-doc"
+        };
+        context.DocFiles.Add(document);
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Title = "Page",
+            Path = "page",
+            DocFileId = document.Id
+        });
+        var task = new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            Status = IncrementalUpdateStatus.Processing,
+            CreatedAt = DateTime.UtcNow
+        };
+        var generationLock = new RepositoryGenerationLock
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            OwnerType = RepositoryGenerationLockOwnerType.IncrementalTask,
+            OwnerId = task.Id,
+            Scope = RepositoryGenerationLockScope.Branch,
+            AcquiredAt = DateTime.UtcNow,
+            UpdatedAt = DateTime.UtcNow
+        };
+        context.AddRange(task, generationLock);
+        await context.SaveChangesAsync();
+        var lease = new GenerationLeaseHandle(
+            generationLock.Id,
+            repository.Id,
+            generationLock.OwnerType,
+            task.Id);
+
+        var cleanPreflight = new LocalGitPreflightResult(true, "source-head", [], [], []);
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(item => item.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(cleanPreflight);
+        analyzer
+            .Setup(item => item.PrepareWorkspaceAsync(
+                repository,
+                branch.BranchName,
+                "old-sha",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RepositoryWorkspace
+            {
+                Organization = repository.OrgName,
+                RepositoryName = repository.RepoName,
+                BranchName = branch.BranchName,
+                WorkingDirectory = "/tmp/draft-workspace",
+                CommitId = "new-sha",
+                PreviousCommitId = "old-sha",
+                SupportsIncrementalUpdates = true
+            });
+        analyzer
+            .Setup(item => item.GetChangedFilesAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                "old-sha",
+                "new-sha",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["src/app.cs"]);
+
+        var wikiGenerator = new Mock<IWikiGenerator>(MockBehavior.Strict);
+        wikiGenerator
+            .Setup(item => item.IncrementalUpdateAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                language,
+                It.IsAny<string[]>(),
+                It.IsAny<CancellationToken>(),
+                lease,
+                It.IsAny<IIncrementalWikiDraft>()))
+            .Returns((RepositoryWorkspace _, BranchLanguage _, string[] _, CancellationToken cancellationToken,
+                GenerationLeaseHandle? _, IIncrementalWikiDraft draft) =>
+                draft.WriteDocumentAsync(language.Id, "page", "published-doc", null, cancellationToken));
+        var notificationService = new Mock<ISubscriberNotificationService>(MockBehavior.Strict);
+        notificationService
+            .Setup(item => item.NotifySubscribersAsync(
+                It.IsAny<RepositoryUpdateNotification>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        var options = Options.Create(new IncrementalUpdateOptions());
+        var writeGuard = new GenerationWriteGuard(options);
+        var publisher = new IncrementalWikiPublisher(context, analyzer.Object, writeGuard);
+        var service = new IncrementalUpdateService(
+            analyzer.Object,
+            wikiGenerator.Object,
+            Mock.Of<IRepositorySkillMarkdownBuilder>(MockBehavior.Strict),
+            notificationService.Object,
+            context,
+            options,
+            Mock.Of<ILogger<IncrementalUpdateService>>(),
+            writeGuard,
+            publisher);
+
+        var result = await service.ProcessIncrementalUpdateAsync(
+            repository.Id,
+            branch.Id,
+            lease: lease);
+
+        Assert.True(result.Success);
+        Assert.True(result.PublishedAtomically);
+        Assert.Equal("published-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Equal("new-sha", (await context.RepositoryBranches.SingleAsync()).LastCommitId);
+        Assert.Equal(IncrementalUpdateStatus.Completed, (await context.IncrementalUpdateTasks.SingleAsync()).Status);
+        wikiGenerator.VerifyAll();
+        notificationService.VerifyAll();
+        analyzer.VerifyAll();
+    }
+
     [Theory]
     [InlineData(3, false)]
     [InlineData(4, true)]

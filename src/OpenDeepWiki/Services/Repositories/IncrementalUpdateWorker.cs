@@ -165,9 +165,12 @@ public class IncrementalUpdateWorker : BackgroundService
                 processingCancellation.Token,
                 lease);
 
-            // Do not allow a success/failure terminal write to race past a source
-            // worktree that became dirty while the update was running.
-            await ThrowIfLocalGitDirtyAsync(repositoryAnalyzer, repository, stoppingToken);
+            if (!result.PublishedAtomically)
+            {
+                // Draft publish owns the terminal state at its source-validation
+                // linearization point. Legacy paths still need this final check.
+                await ThrowIfLocalGitDirtyAsync(repositoryAnalyzer, repository, stoppingToken);
+            }
 
             if (leaseMonitor.LeaseLost)
             {
@@ -180,9 +183,12 @@ public class IncrementalUpdateWorker : BackgroundService
 
             if (result.Success)
             {
-                task.TargetCommitId = result.CurrentCommitId;
-                await UpdateTaskStatusAsync(
-                    context, writeGuard, lease, task, IncrementalUpdateStatus.Completed, null, stoppingToken);
+                if (!result.PublishedAtomically)
+                {
+                    task.TargetCommitId = result.CurrentCommitId;
+                    await UpdateTaskStatusAsync(
+                        context, writeGuard, lease, task, IncrementalUpdateStatus.Completed, null, stoppingToken);
+                }
 
                 _logger.LogInformation(
                     "Task completed successfully. TaskId: {TaskId}, ChangedFiles: {ChangedFiles}, Duration: {Duration}ms",
@@ -219,6 +225,21 @@ public class IncrementalUpdateWorker : BackgroundService
                     task,
                     IncrementalUpdateStatus.Cancelled,
                     $"{LocalGitWorktreeDirtyException.ErrorCode}: {ex.Message}",
+                    stoppingToken);
+            }
+        }
+        catch (Exception ex) when (ex is LocalGitSourceVersionChangedException or
+                                   IncrementalBaselineConflictException)
+        {
+            if (lease is not null)
+            {
+                await UpdateTaskStatusAsync(
+                    context,
+                    writeGuard,
+                    lease,
+                    task,
+                    IncrementalUpdateStatus.Cancelled,
+                    ex.Message,
                     stoppingToken);
             }
         }
@@ -427,6 +448,11 @@ public class IncrementalUpdateWorker : BackgroundService
         string? errorMessage,
         CancellationToken stoppingToken)
     {
+        if (context is DbContext dbContext && dbContext.Entry(task).State == EntityState.Detached)
+        {
+            context.IncrementalUpdateTasks.Update(task);
+        }
+
         task.Status = status;
         task.ErrorMessage = errorMessage;
         task.UpdatedAt = DateTime.UtcNow;

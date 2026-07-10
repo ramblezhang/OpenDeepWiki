@@ -1,7 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Options;
-using System.Runtime.InteropServices;
 using OpenDeepWiki.EFCore;
 using OpenDeepWiki.Entities;
 using OpenDeepWiki.Services.Repositories;
@@ -77,14 +76,7 @@ public class GenerationWriteGuardTests
     [Fact]
     public async Task SqliteFencedWriteAndRecoveryRaceHasSingleWinner()
     {
-        if (OperatingSystem.IsLinux())
-        {
-            NativeLibrary.SetDllImportResolver(
-                typeof(SQLitePCL.SQLite3Provider_e_sqlite3).Assembly,
-                (libraryName, assembly, searchPath) => libraryName == "e_sqlite3"
-                    ? NativeLibrary.Load("libsqlite3.so.0", assembly, searchPath)
-                    : IntPtr.Zero);
-        }
+        SqliteTestSupport.EnsureInitialized();
         var databasePath = Path.Combine(Path.GetTempPath(), $"opendeepwiki-fence-{Guid.NewGuid():N}.db");
         var options = new DbContextOptionsBuilder<TestDbContext>()
             .UseSqlite($"Data Source={databasePath};Default Timeout=5")

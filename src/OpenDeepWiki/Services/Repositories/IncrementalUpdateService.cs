@@ -22,6 +22,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
     private readonly IncrementalUpdateOptions _options;
     private readonly ILogger<IncrementalUpdateService> _logger;
     private readonly IGenerationWriteGuard? _writeGuard;
+    private readonly IIncrementalWikiPublisher? _wikiPublisher;
 
     public IncrementalUpdateService(
         IRepositoryAnalyzer repositoryAnalyzer,
@@ -31,7 +32,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         IContext context,
         IOptions<IncrementalUpdateOptions> options,
         ILogger<IncrementalUpdateService> logger,
-        IGenerationWriteGuard? writeGuard = null)
+        IGenerationWriteGuard? writeGuard = null,
+        IIncrementalWikiPublisher? wikiPublisher = null)
     {
         _repositoryAnalyzer = repositoryAnalyzer;
         _wikiGenerator = wikiGenerator;
@@ -41,6 +43,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         _options = options.Value;
         _logger = logger;
         _writeGuard = writeGuard;
+        _wikiPublisher = wikiPublisher;
     }
 
     /// <inheritdoc />
@@ -151,16 +154,35 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                     $"Repository or branch not found. RepositoryId: {repositoryId}, BranchId: {branchId}");
             }
 
-            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+            var sourcePreflight = await GetCleanLocalGitPreflightAsync(repository, cancellationToken);
 
             var previousCommitId = branch.LastCommitId;
             var workspace = await PrepareWorkspaceWithRetryAsync(
                 repository, branch.BranchName, previousCommitId, cancellationToken);
-            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+            await EnsureLocalGitSourceVersionAsync(repository, sourcePreflight, cancellationToken);
             var currentCommitId = workspace.CommitId;
+            var draft = sourcePreflight is { IsLocalGit: true, HeadCommitId: not null } && lease is not null
+                ? new IncrementalWikiDraft(
+                    _context,
+                    sourcePreflight.HeadCommitId,
+                    _options.DraftMaxBytes,
+                    token => EnsureLocalGitSourceVersionAsync(repository, sourcePreflight, token))
+                : null;
 
             if (previousCommitId == currentCommitId)
             {
+                if (draft is not null)
+                {
+                    await PublishDraftAsync(
+                        draft,
+                        repository,
+                        branch,
+                        previousCommitId,
+                        currentCommitId,
+                        lease!,
+                        cancellationToken);
+                }
+
                 stopwatch.Stop();
                 _logger.LogInformation(
                     "No update needed. RepositoryId: {RepositoryId}, Duration: {Duration}ms",
@@ -173,6 +195,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                     CurrentCommitId = currentCommitId,
                     ChangedFilesCount = 0,
                     UpdatedDocumentsCount = 0,
+                    PublishedAtomically = draft is not null,
                     Duration = stopwatch.Elapsed
                 };
             }
@@ -185,7 +208,21 @@ public class IncrementalUpdateService : IIncrementalUpdateService
 
             if (changedFiles.Length == 0 && !string.IsNullOrEmpty(previousCommitId))
             {
-                await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken, lease);
+                if (draft is not null)
+                {
+                    await PublishDraftAsync(
+                        draft,
+                        repository,
+                        branch,
+                        previousCommitId,
+                        currentCommitId,
+                        lease!,
+                        cancellationToken);
+                }
+                else
+                {
+                    await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken, lease);
+                }
 
                 stopwatch.Stop();
                 _logger.LogInformation(
@@ -199,6 +236,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                     CurrentCommitId = currentCommitId,
                     ChangedFilesCount = 0,
                     UpdatedDocumentsCount = 0,
+                    PublishedAtomically = draft is not null,
                     Duration = stopwatch.Elapsed
                 };
             }
@@ -209,8 +247,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
 
             var updatedDocumentsCount = 0;
 
-            // Revalidate immediately before the first fenced document/catalog write.
-            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+            await EnsureLocalGitSourceVersionAsync(repository, sourcePreflight, cancellationToken);
 
             foreach (var branchLanguage in branchLanguages)
             {
@@ -225,23 +262,50 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                     branchLanguage,
                     changedFiles,
                     cancellationToken,
-                    lease);
+                    lease,
+                    draft);
 
                 if (repository.GenerateSkill)
                 {
-                    await _skillMarkdownBuilder.RefreshSkillMarkdownAsync(
-                        _context,
-                        repository,
-                        branch,
-                        branchLanguage,
-                        cancellationToken,
-                        lease);
+                    if (draft is not null)
+                    {
+                        await _skillMarkdownBuilder.StageSkillMarkdownAsync(
+                            draft,
+                            repository,
+                            branch,
+                            branchLanguage,
+                            cancellationToken);
+                    }
+                    else
+                    {
+                        await _skillMarkdownBuilder.RefreshSkillMarkdownAsync(
+                            _context,
+                            repository,
+                            branch,
+                            branchLanguage,
+                            cancellationToken,
+                            lease);
+                    }
                 }
 
                 updatedDocumentsCount++;
             }
 
-            await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken, lease);
+            if (draft is not null)
+            {
+                await PublishDraftAsync(
+                    draft,
+                    repository,
+                    branch,
+                    previousCommitId,
+                    currentCommitId,
+                    lease!,
+                    cancellationToken);
+            }
+            else
+            {
+                await AdvanceBranchStateAsync(repository, branch, currentCommitId, cancellationToken, lease);
+            }
 
             await NotifySubscribersSafelyAsync(
                 repository,
@@ -255,9 +319,11 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                 },
                 cancellationToken);
 
-            // The worker persists Completed after this method returns. Keep that final
-            // fenced transition behind a fresh source preflight as well.
-            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+            if (draft is null)
+            {
+                // Non-draft paths still rely on the worker's terminal fenced write.
+                await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+            }
 
             stopwatch.Stop();
 
@@ -272,10 +338,15 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                 CurrentCommitId = currentCommitId,
                 ChangedFilesCount = changedFiles.Length,
                 UpdatedDocumentsCount = updatedDocumentsCount,
+                PublishedAtomically = draft is not null,
                 Duration = stopwatch.Elapsed
             };
         }
-        catch (Exception ex) when (ex is GenerationLeaseLostException or LocalGitWorktreeDirtyException)
+        catch (Exception ex) when (ex is GenerationLeaseLostException or
+                                   LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalBaselineConflictException or
+                                   IncrementalWikiDraftLimitExceededException)
         {
             throw;
         }
@@ -388,15 +459,69 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         Repository repository,
         CancellationToken cancellationToken)
     {
+        await GetCleanLocalGitPreflightAsync(repository, cancellationToken);
+    }
+
+    private async Task<LocalGitPreflightResult?> GetCleanLocalGitPreflightAsync(
+        Repository repository,
+        CancellationToken cancellationToken)
+    {
         if (RepositorySource.Parse(repository.GitUrl).SourceType != RepositorySourceType.LocalDirectory)
         {
-            return;
+            return null;
         }
 
         var preflight = await _repositoryAnalyzer.GetLocalGitPreflightAsync(repository, cancellationToken);
         if (preflight.IsLocalGit && !preflight.IsClean)
         {
             throw new LocalGitWorktreeDirtyException(preflight);
+        }
+
+        return preflight.IsLocalGit ? preflight : null;
+    }
+
+    private async Task EnsureLocalGitSourceVersionAsync(
+        Repository repository,
+        LocalGitPreflightResult? expected,
+        CancellationToken cancellationToken)
+    {
+        if (expected is null)
+        {
+            return;
+        }
+
+        var current = await GetCleanLocalGitPreflightAsync(repository, cancellationToken);
+        if (current is null ||
+            !string.Equals(current.HeadCommitId, expected.HeadCommitId, StringComparison.Ordinal))
+        {
+            throw new LocalGitSourceVersionChangedException(
+                expected.HeadCommitId,
+                current?.HeadCommitId);
+        }
+    }
+
+    private async Task PublishDraftAsync(
+        IIncrementalWikiDraft draft,
+        Repository repository,
+        RepositoryBranch branch,
+        string? expectedBaseline,
+        string targetCommitId,
+        GenerationLeaseHandle lease,
+        CancellationToken cancellationToken)
+    {
+        await (_wikiPublisher ?? throw new InvalidOperationException("Incremental wiki publisher is not configured."))
+            .PublishAsync(
+                draft,
+                repository.Id,
+                branch.Id,
+                expectedBaseline,
+                targetCommitId,
+                lease,
+                cancellationToken);
+
+        if (_context is DbContext dbContext)
+        {
+            await dbContext.Entry(branch).ReloadAsync(cancellationToken);
         }
     }
 

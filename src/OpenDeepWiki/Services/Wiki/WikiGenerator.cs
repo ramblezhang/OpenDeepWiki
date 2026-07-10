@@ -664,7 +664,8 @@ Execute the workflow now. The runtime context already contains the directory tre
         BranchLanguage branchLanguage,
         string[] changedFiles,
         CancellationToken cancellationToken = default,
-        GenerationLeaseHandle? lease = null)
+        GenerationLeaseHandle? lease = null,
+        IIncrementalWikiDraft? draft = null)
     {
         if (changedFiles.Length == 0)
         {
@@ -698,7 +699,12 @@ Execute the workflow now. The runtime context already contains the directory tre
             _logger.LogDebug("Initializing tools for incremental update");
             var toolSnapshot = await CreateToolSnapshotAsync(cancellationToken);
             var gitTool = new GitTool(workspace.WorkingDirectory);
-            var catalogStorage = new CatalogStorage(_context, branchLanguage.Id, _generationWriteGuard, lease);
+            var catalogStorage = new CatalogStorage(
+                _context,
+                branchLanguage.Id,
+                _generationWriteGuard,
+                lease,
+                draft);
             var catalogTool = new CatalogTool(catalogStorage);
             var docTool = new DocTool(
                 _context,
@@ -706,7 +712,8 @@ Execute the workflow now. The runtime context already contains the directory tre
                 string.Empty,
                 gitTool,
                 generationWriteGuard: _generationWriteGuard,
-                generationLease: lease);
+                generationLease: lease,
+                draft: draft);
 
             // Incremental updates must never replace the whole catalog: exclude WriteCatalog
             // so the agent can only modify existing structure via EditCatalog.

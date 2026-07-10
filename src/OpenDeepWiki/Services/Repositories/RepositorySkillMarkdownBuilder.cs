@@ -45,6 +45,24 @@ public partial class RepositorySkillMarkdownBuilder(IGenerationWriteGuard? gener
         }
     }
 
+    public async Task StageSkillMarkdownAsync(
+        IIncrementalWikiDraft draft,
+        Repository repository,
+        RepositoryBranch branch,
+        BranchLanguage language,
+        CancellationToken cancellationToken = default)
+    {
+        var catalogs = await draft.GetCatalogsAsync(
+            language.Id,
+            includeDocuments: true,
+            cancellationToken);
+        var generatedAtUtc = DateTime.UtcNow;
+        draft.StageSkillMarkdown(
+            language.Id,
+            BuildSkillMarkdown(repository, branch, language, catalogs, generatedAtUtc),
+            generatedAtUtc);
+    }
+
     public string BuildSkillMarkdown(
         Repository repository,
         RepositoryBranch branch,

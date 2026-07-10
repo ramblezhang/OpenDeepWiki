@@ -21,6 +21,13 @@ public interface IRepositorySkillMarkdownBuilder
         CancellationToken cancellationToken = default,
         GenerationLeaseHandle? lease = null);
 
+    Task StageSkillMarkdownAsync(
+        IIncrementalWikiDraft draft,
+        Repository repository,
+        RepositoryBranch branch,
+        BranchLanguage language,
+        CancellationToken cancellationToken = default);
+
     Task AddDocumentsToArchiveAsync(
         ZipArchive archive,
         IReadOnlyList<DocCatalog> catalogs,

@@ -21,6 +21,7 @@ public class DocTool
     private readonly int? _maxAppendOperations;
     private readonly IGenerationWriteGuard? _generationWriteGuard;
     private readonly GenerationLeaseHandle? _generationLease;
+    private readonly IIncrementalWikiDraft? _draft;
     private int _appendOperations;
     private const int MaxDatabaseWriteAttempts = 3;
     private const int DatabaseWriteRetryBaseDelayMs = 250;
@@ -40,7 +41,8 @@ public class DocTool
         GitTool? gitTool = null,
         int? maxAppendOperations = null,
         IGenerationWriteGuard? generationWriteGuard = null,
-        GenerationLeaseHandle? generationLease = null)
+        GenerationLeaseHandle? generationLease = null,
+        IIncrementalWikiDraft? draft = null)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _branchLanguageId = branchLanguageId ?? throw new ArgumentNullException(nameof(branchLanguageId));
@@ -49,6 +51,7 @@ public class DocTool
         _maxAppendOperations = maxAppendOperations is > 0 ? maxAppendOperations : null;
         _generationWriteGuard = generationWriteGuard;
         _generationLease = generationLease;
+        _draft = draft;
     }
 
     /// <summary>
@@ -88,6 +91,28 @@ content: '# Overview\n\nThis is the overview section...'")]
 
         try
         {
+            if (_draft is not null)
+            {
+                var result = await _draft.WriteDocumentAsync(
+                    _branchLanguageId,
+                    catalogPath,
+                    content,
+                    GetSourceFilesJson(),
+                    cancellationToken);
+                return result.Status switch
+                {
+                    DraftDocumentMutationStatus.Created =>
+                        $"SUCCESS: Document '{catalogPath}' has been created successfully.",
+                    DraftDocumentMutationStatus.Updated =>
+                        $"SUCCESS: Document '{catalogPath}' has been updated successfully.",
+                    DraftDocumentMutationStatus.CatalogNotFound =>
+                        $"ERROR: Catalog item with path '{catalogPath}' not found. Please ensure the catalog item exists before writing content.",
+                    DraftDocumentMutationStatus.NavigationNode =>
+                        $"ERROR: Catalog item '{catalogPath}' has child catalog items and is a navigation node. Documents can only be written to leaf catalog items.",
+                    _ => $"ERROR: Failed to write document '{catalogPath}'."
+                };
+            }
+
             // Find the catalog item
             var catalog = await _context.DocCatalogs
                 .FirstOrDefaultAsync(c => c.BranchLanguageId == _branchLanguageId &&
@@ -157,6 +182,12 @@ content: '# Overview\n\nThis is the overview section...'")]
         {
             throw;
         }
+        catch (Exception ex) when (ex is LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalWikiDraftLimitExceededException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return $"ERROR: Failed to write document '{catalogPath}': {ex.Message}";
@@ -205,6 +236,33 @@ content: '\n## Failure Modes\n\nThe service handles ... '")]
             if (_maxAppendOperations.HasValue && _appendOperations >= _maxAppendOperations.Value)
             {
                 return $"SUCCESS: Append budget reached ({_appendOperations}/{_maxAppendOperations.Value}). The document already has persisted content; stop appending and provide the final summary.";
+            }
+
+            if (_draft is not null)
+            {
+                var result = await _draft.AppendDocumentAsync(
+                    _branchLanguageId,
+                    catalogPath,
+                    content,
+                    GetSourceFilesJson(),
+                    cancellationToken);
+                if (result.Status is DraftDocumentMutationStatus.Created or DraftDocumentMutationStatus.Updated)
+                {
+                    _appendOperations++;
+                }
+
+                return result.Status switch
+                {
+                    DraftDocumentMutationStatus.Created =>
+                        $"SUCCESS: Created document '{catalogPath}' and wrote initial content. Current length: {result.ContentLength} characters.",
+                    DraftDocumentMutationStatus.Updated =>
+                        $"SUCCESS: Appended content to document '{catalogPath}'. Current length: {result.ContentLength} characters.",
+                    DraftDocumentMutationStatus.CatalogNotFound =>
+                        $"ERROR: Catalog item with path '{catalogPath}' not found. Please ensure the catalog item exists before writing content.",
+                    DraftDocumentMutationStatus.NavigationNode =>
+                        $"ERROR: Catalog item '{catalogPath}' has child catalog items and is a navigation node. Documents can only be appended to leaf catalog items.",
+                    _ => $"ERROR: Failed to append to document '{catalogPath}'."
+                };
             }
 
             // Find the catalog item
@@ -278,6 +336,12 @@ content: '\n## Failure Modes\n\nThe service handles ... '")]
         {
             throw;
         }
+        catch (Exception ex) when (ex is LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalWikiDraftLimitExceededException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return $"ERROR: Failed to append to document '{catalogPath}': {ex.Message}";
@@ -323,6 +387,30 @@ newContent: '## New Section\n\nUpdated content here'")]
 
         try
         {
+            if (_draft is not null)
+            {
+                var result = await _draft.EditDocumentAsync(
+                    _branchLanguageId,
+                    catalogPath,
+                    oldContent,
+                    newContent,
+                    cancellationToken);
+                return result.Status switch
+                {
+                    DraftDocumentMutationStatus.Updated =>
+                        $"SUCCESS: Document '{catalogPath}' has been edited successfully.",
+                    DraftDocumentMutationStatus.CatalogNotFound =>
+                        $"ERROR: Catalog item with path '{catalogPath}' not found.",
+                    DraftDocumentMutationStatus.NavigationNode =>
+                        $"ERROR: Catalog item '{catalogPath}' has child catalog items and is a navigation node. Documents can only be edited on leaf catalog items.",
+                    DraftDocumentMutationStatus.DocumentNotFound =>
+                        $"ERROR: No document associated with catalog item '{catalogPath}'. Use WriteAsync to create a document first.",
+                    DraftDocumentMutationStatus.OldContentNotFound =>
+                        "ERROR: The specified content to replace was not found in the document. Please use ReadAsync to see the current content and ensure the text matches exactly.",
+                    _ => $"ERROR: Failed to edit document '{catalogPath}'."
+                };
+            }
+
             // Find the catalog item
             var catalog = await _context.DocCatalogs
                 .FirstOrDefaultAsync(c => c.BranchLanguageId == _branchLanguageId &&
@@ -370,6 +458,12 @@ newContent: '## New Section\n\nUpdated content here'")]
         {
             throw;
         }
+        catch (Exception ex) when (ex is LocalGitWorktreeDirtyException or
+                                   LocalGitSourceVersionChangedException or
+                                   IncrementalWikiDraftLimitExceededException)
+        {
+            throw;
+        }
         catch (Exception ex)
         {
             return $"ERROR: Failed to edit document '{catalogPath}': {ex.Message}";
@@ -399,6 +493,14 @@ Usage:
         if (catalogPath == null)
         {
             return "ERROR: Catalog path is required. Provide the path parameter for incremental updates.";
+        }
+
+        if (_draft is not null)
+        {
+            return await _draft.ReadDocumentAsync(
+                _branchLanguageId,
+                catalogPath,
+                cancellationToken);
         }
 
         // Find the catalog item
@@ -443,6 +545,14 @@ Usage:
         if (catalogPath == null)
         {
             return false;
+        }
+
+        if (_draft is not null)
+        {
+            return await _draft.DocumentExistsAsync(
+                _branchLanguageId,
+                catalogPath,
+                cancellationToken);
         }
 
         var catalog = await _context.DocCatalogs
@@ -512,6 +622,17 @@ Usage:
         }
 
         return path.Trim().Trim('/');
+    }
+
+    private string? GetSourceFilesJson()
+    {
+        if (_gitTool is null)
+        {
+            return null;
+        }
+
+        var readFiles = _gitTool.GetReadFiles();
+        return readFiles.Count == 0 ? null : JsonSerializer.Serialize(readFiles);
     }
 
     private async Task SaveChangesWithRetryAsync(CancellationToken cancellationToken)

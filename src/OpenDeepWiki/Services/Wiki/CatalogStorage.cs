@@ -16,6 +16,7 @@ public class CatalogStorage
     private readonly string _branchLanguageId;
     private readonly IGenerationWriteGuard? _generationWriteGuard;
     private readonly GenerationLeaseHandle? _generationLease;
+    private readonly IIncrementalWikiDraft? _draft;
     
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -32,12 +33,14 @@ public class CatalogStorage
         IContext context,
         string branchLanguageId,
         IGenerationWriteGuard? generationWriteGuard = null,
-        GenerationLeaseHandle? generationLease = null)
+        GenerationLeaseHandle? generationLease = null,
+        IIncrementalWikiDraft? draft = null)
     {
         _context = context ?? throw new ArgumentNullException(nameof(context));
         _branchLanguageId = branchLanguageId ?? throw new ArgumentNullException(nameof(branchLanguageId));
         _generationWriteGuard = generationWriteGuard;
         _generationLease = generationLease;
+        _draft = draft;
     }
 
     /// <summary>
@@ -46,10 +49,15 @@ public class CatalogStorage
     /// <returns>JSON string representing the catalog structure.</returns>
     public async Task<string> GetCatalogJsonAsync(CancellationToken cancellationToken = default)
     {
-        var catalogs = await _context.DocCatalogs
-            .Where(c => c.BranchLanguageId == _branchLanguageId && !c.IsDeleted)
-            .OrderBy(c => c.Order)
-            .ToListAsync(cancellationToken);
+        var catalogs = _draft is null
+            ? await _context.DocCatalogs
+                .Where(c => c.BranchLanguageId == _branchLanguageId && !c.IsDeleted)
+                .OrderBy(c => c.Order)
+                .ToListAsync(cancellationToken)
+            : (await _draft.GetCatalogsAsync(
+                _branchLanguageId,
+                includeDocuments: false,
+                cancellationToken)).ToList();
 
         var root = BuildCatalogTree(catalogs);
         return JsonSerializer.Serialize(root, JsonOptions);
@@ -63,6 +71,11 @@ public class CatalogStorage
     /// <param name="cancellationToken">Cancellation token.</param>
     public async Task SetCatalogAsync(string catalogJson, CancellationToken cancellationToken = default)
     {
+        if (_draft is not null)
+        {
+            throw new InvalidOperationException("Replacing the entire catalog is disabled for incremental drafts.");
+        }
+
         if (string.IsNullOrWhiteSpace(catalogJson))
         {
             throw new ArgumentException("Catalog JSON cannot be empty.", nameof(catalogJson));
@@ -123,6 +136,16 @@ public class CatalogStorage
             throw new ArgumentException("Invalid node JSON format.", nameof(nodeJson));
         }
 
+        if (_draft is not null)
+        {
+            await _draft.UpdateCatalogNodeAsync(
+                _branchLanguageId,
+                path,
+                updatedItem,
+                cancellationToken);
+            return;
+        }
+
         var existingCatalog = await _context.DocCatalogs
             .FirstOrDefaultAsync(c => c.BranchLanguageId == _branchLanguageId && 
                                       c.Path == path && 
@@ -170,6 +193,16 @@ public class CatalogStorage
     /// <returns>The catalog item or null if not found.</returns>
     public async Task<CatalogItem?> GetNodeAsync(string path, CancellationToken cancellationToken = default)
     {
+        if (_draft is not null)
+        {
+            var draftCatalogs = (await _draft.GetCatalogsAsync(
+                _branchLanguageId,
+                includeDocuments: false,
+                cancellationToken)).ToList();
+            var draftCatalog = draftCatalogs.FirstOrDefault(c => c.Path == path && !c.IsDeleted);
+            return draftCatalog is null ? null : BuildCatalogItemWithChildren(draftCatalog, draftCatalogs);
+        }
+
         var catalog = await _context.DocCatalogs
             .FirstOrDefaultAsync(c => c.BranchLanguageId == _branchLanguageId && 
                                       c.Path == path && 

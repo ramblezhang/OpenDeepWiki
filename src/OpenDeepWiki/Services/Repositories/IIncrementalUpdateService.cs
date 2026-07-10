@@ -80,6 +80,11 @@ public class IncrementalUpdateResult
     public int UpdatedDocumentsCount { get; set; }
 
     /// <summary>
+    /// Whether the task, wiki changes, skill, and baseline were committed by the draft publisher.
+    /// </summary>
+    public bool PublishedAtomically { get; set; }
+
+    /// <summary>
     /// 处理耗时
     /// </summary>
     public TimeSpan Duration { get; set; }

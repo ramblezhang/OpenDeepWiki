@@ -264,6 +264,7 @@ try
     // 注册增量更新服务
     // Requirements: 2.1 - 增量更新服务接口
     builder.Services.AddScoped<IIncrementalUpdateService, IncrementalUpdateService>();
+    builder.Services.AddScoped<IIncrementalWikiPublisher, IncrementalWikiPublisher>();
 
     // 注册订阅者通知服务（空实现）
     // Requirements: 4.1 - 订阅者通知服务接口
