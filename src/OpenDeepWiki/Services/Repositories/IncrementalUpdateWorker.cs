@@ -87,7 +87,13 @@ public class IncrementalUpdateWorker : BackgroundService
             }
 
             await ProcessSingleTaskAsync(
-                context, updateService, generationLockService, writeGuard, task, stoppingToken);
+                context,
+                updateService,
+                repositoryAnalyzer,
+                generationLockService,
+                writeGuard,
+                task,
+                stoppingToken);
         }
 
         await CheckScheduledUpdatesAsync(context, gitPlatformService, repositoryAnalyzer, stoppingToken);
@@ -107,6 +113,7 @@ public class IncrementalUpdateWorker : BackgroundService
     private async Task ProcessSingleTaskAsync(
         IContext context,
         IIncrementalUpdateService updateService,
+        IRepositoryAnalyzer repositoryAnalyzer,
         IRepositoryGenerationLockService generationLockService,
         IGenerationWriteGuard writeGuard,
         IncrementalUpdateTask task,
@@ -139,6 +146,11 @@ public class IncrementalUpdateWorker : BackgroundService
                 return;
             }
 
+            var repository = await context.Repositories
+                .FirstOrDefaultAsync(item => item.Id == task.RepositoryId && !item.IsDeleted, stoppingToken)
+                ?? throw new InvalidOperationException($"Repository not found: {task.RepositoryId}");
+            await ThrowIfLocalGitDirtyAsync(repositoryAnalyzer, repository, stoppingToken);
+
             await UpdateTaskStatusAsync(
                 context, writeGuard, lease, task, IncrementalUpdateStatus.Processing, null, stoppingToken);
             heartbeatTask = RunLeaseHeartbeatAsync(
@@ -152,6 +164,10 @@ public class IncrementalUpdateWorker : BackgroundService
                 task.BranchId,
                 processingCancellation.Token,
                 lease);
+
+            // Do not allow a success/failure terminal write to race past a source
+            // worktree that became dirty while the update was running.
+            await ThrowIfLocalGitDirtyAsync(repositoryAnalyzer, repository, stoppingToken);
 
             if (leaseMonitor.LeaseLost)
             {
@@ -230,6 +246,23 @@ public class IncrementalUpdateWorker : BackgroundService
             {
                 await ReleaseIncrementalLeaseAsync(lease, CancellationToken.None);
             }
+        }
+    }
+
+    private static async Task ThrowIfLocalGitDirtyAsync(
+        IRepositoryAnalyzer repositoryAnalyzer,
+        Repository repository,
+        CancellationToken cancellationToken)
+    {
+        if (RepositorySource.Parse(repository.GitUrl).SourceType != RepositorySourceType.LocalDirectory)
+        {
+            return;
+        }
+
+        var preflight = await repositoryAnalyzer.GetLocalGitPreflightAsync(repository, cancellationToken);
+        if (preflight.IsLocalGit && !preflight.IsClean)
+        {
+            throw new LocalGitWorktreeDirtyException(preflight);
         }
     }
 

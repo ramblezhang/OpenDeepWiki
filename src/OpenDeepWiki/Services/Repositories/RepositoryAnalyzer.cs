@@ -174,24 +174,36 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             return new LocalGitPreflightResult(false, null, [], [], []);
         }
 
-        var safeDirectories = BuildGitCliSafeDirectories(localGitSource.RepositoryPath);
+        return await GetLocalGitPreflightAsync(localGitSource.RepositoryPath, cancellationToken);
+    }
+
+    private async Task<LocalGitPreflightResult> GetLocalGitPreflightAsync(
+        string repositoryPath,
+        CancellationToken cancellationToken)
+    {
+        var safeDirectories = BuildGitCliSafeDirectories(repositoryPath);
         var head = await RunGitCliAsync(
-            localGitSource.RepositoryPath,
+            repositoryPath,
             ["rev-parse", "HEAD"],
             cancellationToken,
             throwOnError: true,
             safeDirectories: safeDirectories);
         var status = await RunGitCliAsync(
-            localGitSource.RepositoryPath,
+            repositoryPath,
             ["status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"],
             cancellationToken,
             throwOnError: true,
             safeDirectories: safeDirectories);
 
+        return ParseLocalGitPreflight(head.Output, status.Output);
+    }
+
+    private static LocalGitPreflightResult ParseLocalGitPreflight(string head, string status)
+    {
         var staged = new List<string>();
         var modified = new List<string>();
         var untracked = new List<string>();
-        foreach (var line in status.Output.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var line in status.Split('\n', StringSplitOptions.RemoveEmptyEntries))
         {
             if (line.StartsWith("? ", StringComparison.Ordinal))
             {
@@ -218,7 +230,40 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             }
         }
 
-        return new LocalGitPreflightResult(true, head.Output.Trim(), staged, modified, untracked);
+        return new LocalGitPreflightResult(true, head.Trim(), staged, modified, untracked);
+    }
+
+    private async Task EnsureLocalGitSourceCleanAsync(
+        string repositoryPath,
+        CancellationToken cancellationToken)
+    {
+        var preflight = await GetLocalGitPreflightAsync(repositoryPath, cancellationToken);
+        if (!preflight.IsClean)
+        {
+            throw new LocalGitWorktreeDirtyException(preflight);
+        }
+    }
+
+    private void EnsureLocalGitSourceClean(string repositoryPath)
+    {
+        var safeDirectories = BuildGitCliSafeDirectories(repositoryPath);
+        var head = RunGitCli(repositoryPath, ["rev-parse", "HEAD"], safeDirectories);
+        var status = RunGitCli(
+            repositoryPath,
+            ["status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"],
+            safeDirectories);
+        if (head.ExitCode != 0 || status.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"Failed to inspect local Git source before workspace mutation. " +
+                $"Path: {repositoryPath}, HeadError: {head.Error}, StatusError: {status.Error}");
+        }
+
+        var preflight = ParseLocalGitPreflight(head.Output, status.Output);
+        if (!preflight.IsClean)
+        {
+            throw new LocalGitWorktreeDirtyException(preflight);
+        }
     }
 
     /// <inheritdoc />
@@ -230,6 +275,15 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     {
         var stopwatch = Stopwatch.StartNew();
         var sourceInfo = RepositorySource.Parse(repository.GitUrl);
+        LocalGitSource? localGitSource = null;
+        string? localGitFailureReason = null;
+        if (sourceInfo.SourceType == RepositorySourceType.LocalDirectory &&
+            TryResolveLocalGitSource(sourceInfo.Location, out var resolvedLocalGitSource, out localGitFailureReason))
+        {
+            localGitSource = resolvedLocalGitSource;
+            await EnsureLocalGitSourceCleanAsync(resolvedLocalGitSource.RepositoryPath, cancellationToken);
+        }
+
         var workspace = new RepositoryWorkspace
         {
             Organization = repository.OrgName,
@@ -288,9 +342,9 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             await PrepareArchiveWorkspaceAsync(workspace, cancellationToken);
             workspace.CommitId = ComputeDirectorySnapshotId(workspace.WorkingDirectory);
         }
-        else if (TryResolveLocalGitSource(workspace.SourceLocation, out var localGitSource, out var localGitFailureReason))
+        else if (localGitSource is { } exactLocalGitSource)
         {
-            await PrepareLocalGitWorkspaceAsync(workspace, localGitSource, cancellationToken);
+            await PrepareLocalGitWorkspaceAsync(workspace, exactLocalGitSource, cancellationToken);
             workspace.CommitId = GetHeadCommitId(workspace.WorkingDirectory);
             workspace.SupportsIncrementalUpdates = true;
         }
@@ -490,6 +544,8 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             throw new DirectoryNotFoundException($"Local git source not found: {localGitSource.RepositoryPath}");
         }
 
+        await EnsureLocalGitSourceCleanAsync(localGitSource.RepositoryPath, cancellationToken);
+
         _logger.LogInformation(
             "Preparing local git workspace from target branch. SourcePath: {SourcePath}, Branch: {Branch}, TargetPath: {Path}, AccessMode: {AccessMode}",
             localGitSource.RepositoryPath, workspace.BranchName, workspace.WorkingDirectory, localGitSource.AccessMode);
@@ -516,7 +572,11 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
         {
             if (IsValidWorkspaceForSource(workspace.WorkingDirectory, localGitSource.RepositoryPath, out var workspaceReason))
             {
-                await PullRepositoryAsync(workspace, credentials: null, cancellationToken);
+                await PullRepositoryAsync(
+                    workspace,
+                    credentials: null,
+                    cancellationToken,
+                    localGitSource.RepositoryPath);
             }
             else
             {
@@ -524,8 +584,13 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
                     "Existing local git workspace is missing, invalid, or points at a different source; recloning. SourcePath: {SourcePath}, Branch: {Branch}, TargetPath: {Path}, Reason: {Reason}",
                     localGitSource.RepositoryPath, workspace.BranchName, workspace.WorkingDirectory, workspaceReason);
 
+                await EnsureLocalGitSourceCleanAsync(localGitSource.RepositoryPath, cancellationToken);
                 DeleteWorkspaceDirectoryWithinRepositoryRoot(workspace.WorkingDirectory, localGitSource.RepositoryPath);
-                await CloneRepositoryAsync(workspace, credentials: null, cancellationToken);
+                await CloneRepositoryAsync(
+                    workspace,
+                    credentials: null,
+                    cancellationToken,
+                    localGitSource.RepositoryPath);
             }
 
             workspace.LocalDirectoryImportModeUsed = LocalDirectoryImportMode.Copy;
@@ -563,6 +628,7 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
                 workspaceSafeDirectories,
                 cancellationToken))
         {
+            await EnsureLocalGitSourceCleanAsync(sourcePath, cancellationToken);
             await FetchGitCliBranchAsync(
                 workspace.WorkingDirectory,
                 sourceUploadPackArgument,
@@ -581,8 +647,10 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
                 "Existing local git workspace is missing, invalid, or points at a different source; recloning. SourcePath: {SourcePath}, Branch: {Branch}, TargetPath: {Path}, Reason: {Reason}",
                 sourcePath, workspace.BranchName, workspace.WorkingDirectory, reason);
 
+            await EnsureLocalGitSourceCleanAsync(sourcePath, cancellationToken);
             DeleteWorkspaceDirectoryWithinRepositoryRoot(workspace.WorkingDirectory, sourcePath);
             Directory.CreateDirectory(Path.GetDirectoryName(workspace.WorkingDirectory)!);
+            await EnsureLocalGitSourceCleanAsync(sourcePath, cancellationToken);
             await RunGitCliAsync(
                 Directory.GetCurrentDirectory(),
                 [
@@ -599,6 +667,7 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
         }
 
         workspaceSafeDirectories = BuildGitCliSafeDirectories(workspace.WorkingDirectory, sourcePath);
+        await EnsureLocalGitSourceCleanAsync(sourcePath, cancellationToken);
         await FetchGitCliBranchAsync(
             workspace.WorkingDirectory,
             sourceUploadPackArgument,
@@ -611,12 +680,14 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             workspaceSafeDirectories,
             cancellationToken,
             targetBranch.FetchRefSpec);
+        await EnsureLocalGitSourceCleanAsync(sourcePath, cancellationToken);
         await RunGitCliAsync(
             workspace.WorkingDirectory,
             ["checkout", "-B", workspace.BranchName, targetBranch.CommitId],
             cancellationToken,
             throwOnError: true,
             safeDirectories: workspaceSafeDirectories);
+        await EnsureLocalGitSourceCleanAsync(sourcePath, cancellationToken);
         await RunGitCliAsync(
             workspace.WorkingDirectory,
             ["reset", "--hard", targetBranch.CommitId],
@@ -1451,7 +1522,8 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     private async Task CloneRepositoryAsync(
         RepositoryWorkspace workspace,
         Credentials? credentials,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? localGitSourcePath = null)
     {
         var stopwatch = Stopwatch.StartNew();
         _logger.LogInformation(
@@ -1461,6 +1533,11 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
         // Clean up any existing partial clone
         if (Directory.Exists(workspace.WorkingDirectory))
         {
+            if (localGitSourcePath is not null)
+            {
+                await EnsureLocalGitSourceCleanAsync(localGitSourcePath, cancellationToken);
+            }
+
             _logger.LogDebug("Removing existing partial clone at {Path}", workspace.WorkingDirectory);
             DeleteDirectoryRecursive(workspace.WorkingDirectory);
         }
@@ -1488,16 +1565,33 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
 
             try
             {
+                if (localGitSourcePath is not null)
+                {
+                    await EnsureLocalGitSourceCleanAsync(localGitSourcePath, cancellationToken);
+                }
+
                 _logger.LogDebug(
                     "Clone attempt {Attempt}/{MaxAttempts}. GitUrl: {Url}",
                     retryCount + 1, _options.MaxRetryAttempts, workspace.GitUrl);
 
+                await Task.Run(
+                    () => GitRepository.Clone(workspace.GitUrl, workspace.WorkingDirectory, cloneOptions),
+                    cancellationToken);
+
+                if (localGitSourcePath is not null)
+                {
+                    await EnsureLocalGitSourceCleanAsync(localGitSourcePath, cancellationToken);
+                }
+
                 await Task.Run(() =>
                 {
-                    GitRepository.Clone(workspace.GitUrl, workspace.WorkingDirectory, cloneOptions);
-                    
                     using var repo = new GitRepository(workspace.WorkingDirectory);
-                    CheckoutRemoteBranchHard(repo, workspace.BranchName);
+                    CheckoutRemoteBranchHard(
+                        repo,
+                        workspace.BranchName,
+                        localGitSourcePath is null
+                            ? null
+                            : () => EnsureLocalGitSourceClean(localGitSourcePath));
                 }, cancellationToken);
 
                 stopwatch.Stop();
@@ -1544,7 +1638,8 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
     private async Task PullRepositoryAsync(
         RepositoryWorkspace workspace,
         Credentials? credentials,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? localGitSourcePath = null)
     {
         var stopwatch = Stopwatch.StartNew();
         _logger.LogInformation(
@@ -1560,6 +1655,11 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
 
             try
             {
+                if (localGitSourcePath is not null)
+                {
+                    await EnsureLocalGitSourceCleanAsync(localGitSourcePath, cancellationToken);
+                }
+
                 _logger.LogDebug(
                     "Pull attempt {Attempt}/{MaxAttempts}. Path: {Path}",
                     retryCount + 1, _options.MaxRetryAttempts, workspace.WorkingDirectory);
@@ -1583,8 +1683,22 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
 
                     _logger.LogDebug("Fetching from remote 'origin'");
                     Commands.Fetch(repo, remote.Name, refSpecs, fetchOptions, null);
+                }, cancellationToken);
 
-                    CheckoutRemoteBranchHard(repo, workspace.BranchName);
+                if (localGitSourcePath is not null)
+                {
+                    await EnsureLocalGitSourceCleanAsync(localGitSourcePath, cancellationToken);
+                }
+
+                await Task.Run(() =>
+                {
+                    using var repo = new GitRepository(workspace.WorkingDirectory);
+                    CheckoutRemoteBranchHard(
+                        repo,
+                        workspace.BranchName,
+                        localGitSourcePath is null
+                            ? null
+                            : () => EnsureLocalGitSourceClean(localGitSourcePath));
                 }, cancellationToken);
 
                 stopwatch.Stop();
@@ -1625,7 +1739,10 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
             lastException);
     }
 
-    private void CheckoutRemoteBranchHard(GitRepository repo, string branchName)
+    private void CheckoutRemoteBranchHard(
+        GitRepository repo,
+        string branchName,
+        Action? beforeCheckoutOrReset = null)
     {
         var remoteBranch = repo.Branches[$"origin/{branchName}"];
         if (remoteBranch is null)
@@ -1649,7 +1766,9 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
         }
 
         repo.Branches.Update(localBranch, b => b.TrackedBranch = remoteBranch.CanonicalName);
+        beforeCheckoutOrReset?.Invoke();
         Commands.Checkout(repo, localBranch);
+        beforeCheckoutOrReset?.Invoke();
         repo.Reset(ResetMode.Hard, remoteBranch.Tip);
 
         _logger.LogDebug(

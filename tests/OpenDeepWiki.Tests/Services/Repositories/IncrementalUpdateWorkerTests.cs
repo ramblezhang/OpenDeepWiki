@@ -7,8 +7,14 @@ using Microsoft.Extensions.Options;
 using Moq;
 using OpenDeepWiki.EFCore;
 using OpenDeepWiki.Entities;
+using OpenDeepWiki.Services.Notifications;
 using OpenDeepWiki.Services.Repositories;
+using OpenDeepWiki.Services.Wiki;
 using Xunit;
+using GitCommitOptions = LibGit2Sharp.CommitOptions;
+using GitCommands = LibGit2Sharp.Commands;
+using GitRepository = LibGit2Sharp.Repository;
+using GitSignature = LibGit2Sharp.Signature;
 
 namespace OpenDeepWiki.Tests.Services.Repositories;
 
@@ -199,6 +205,151 @@ public class IncrementalUpdateWorkerTests
         Assert.StartsWith(LocalGitWorktreeDirtyException.ErrorCode, audit.ErrorMessage);
         Assert.DoesNotContain(await context.IncrementalUpdateTasks.ToListAsync(), task =>
             task.Status is IncrementalUpdateStatus.Pending or IncrementalUpdateStatus.Processing);
+        analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task ProcessSingleTaskAsync_WhenSourceBecomesDirtyAfterEntryPreflight_CancelsWithoutWorkspaceOrWrites()
+    {
+        var repositoriesRoot = CreateTempDirectory();
+        var sourceRoot = CreateTempDirectory();
+        GitRepository.Init(sourceRoot);
+        string sourceBranch;
+        string sourceCommit;
+        using (var sourceRepository = new GitRepository(sourceRoot))
+        {
+            File.WriteAllText(Path.Combine(sourceRoot, "tracked.txt"), "original");
+            GitCommands.Stage(sourceRepository, "tracked.txt");
+            var signature = new GitSignature("OpenDeepWiki Tests", "tests@example.com", DateTimeOffset.UtcNow);
+            sourceCommit = sourceRepository.Commit(
+                "initial",
+                signature,
+                signature,
+                new GitCommitOptions()).Sha;
+            sourceBranch = sourceRepository.Head.FriendlyName;
+        }
+
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            updateIntervalMinutes: 60,
+            lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2),
+            gitUrl: RepositorySource.EncodeLocalDirectoryPath(sourceRoot));
+        var branch = SeedBranch(context, repository.Id, sourceBranch, sourceCommit);
+        var languageId = Guid.NewGuid().ToString();
+        var docId = Guid.NewGuid().ToString();
+        context.BranchLanguages.Add(new BranchLanguage
+        {
+            Id = languageId,
+            RepositoryBranchId = branch.Id,
+            LanguageCode = "zh",
+            IsDefault = true
+        });
+        context.DocFiles.Add(new DocFile
+        {
+            Id = docId,
+            BranchLanguageId = languageId,
+            Content = "existing-doc"
+        });
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = languageId,
+            Title = "Existing",
+            Path = "existing",
+            DocFileId = docId
+        });
+        var task = new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            PreviousCommitId = sourceCommit,
+            Status = IncrementalUpdateStatus.Pending,
+            CreatedAt = DateTime.UtcNow
+        };
+        context.IncrementalUpdateTasks.Add(task);
+        await context.SaveChangesAsync();
+
+        var analyzerOptions = new RepositoryAnalyzerOptions
+        {
+            RepositoriesDirectory = repositoriesRoot,
+            AllowedLocalPathRoots = [Path.GetDirectoryName(sourceRoot)!],
+            MaxRetryAttempts = 1
+        };
+        var realAnalyzer = new RepositoryAnalyzer(
+            Options.Create(analyzerOptions),
+            NullLogger<RepositoryAnalyzer>.Instance);
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        var preflightChecks = 0;
+        analyzer
+            .Setup(item => item.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .Returns(async (Repository _, CancellationToken cancellationToken) =>
+            {
+                var cleanPreflight = await realAnalyzer.GetLocalGitPreflightAsync(repository, cancellationToken);
+                if (Interlocked.Increment(ref preflightChecks) == 2)
+                {
+                    File.WriteAllText(Path.Combine(sourceRoot, "became-dirty.txt"), "dirty after entry preflight");
+                }
+
+                return cleanPreflight;
+            });
+        analyzer
+            .Setup(item => item.PrepareWorkspaceAsync(
+                repository,
+                sourceBranch,
+                sourceCommit,
+                It.IsAny<CancellationToken>()))
+            .Returns((Repository _, string branchName, string? previousCommitId, CancellationToken cancellationToken) =>
+                realAnalyzer.PrepareWorkspaceAsync(repository, branchName, previousCommitId, cancellationToken));
+
+        var wikiGenerator = new Mock<IWikiGenerator>(MockBehavior.Strict);
+        var skillBuilder = new Mock<IRepositorySkillMarkdownBuilder>(MockBehavior.Strict);
+        var notificationService = new Mock<ISubscriberNotificationService>(MockBehavior.Strict);
+        var updateOptions = Options.Create(new IncrementalUpdateOptions { MaxRetryAttempts = 1 });
+        var updateService = new IncrementalUpdateService(
+            analyzer.Object,
+            wikiGenerator.Object,
+            skillBuilder.Object,
+            notificationService.Object,
+            context,
+            updateOptions,
+            NullLogger<IncrementalUpdateService>.Instance,
+            new GenerationWriteGuard(updateOptions));
+        var workerServices = new ServiceCollection();
+        workerServices.AddSingleton<IContext>(context);
+        workerServices.AddScoped<IRepositoryGenerationLockService, RepositoryGenerationLockService>();
+        await using var workerProvider = workerServices.BuildServiceProvider();
+        var worker = new IncrementalUpdateWorker(
+            workerProvider.GetRequiredService<IServiceScopeFactory>(),
+            NullLogger<IncrementalUpdateWorker>.Instance,
+            Options.Create(new IncrementalUpdateOptions()));
+
+        await InvokeProcessSingleTaskAsync(
+            worker,
+            context,
+            updateService,
+            new RepositoryGenerationLockService(context),
+            task,
+            analyzer.Object);
+
+        Assert.Equal(2, preflightChecks);
+        Assert.Equal(IncrementalUpdateStatus.Cancelled, task.Status);
+        Assert.StartsWith(LocalGitWorktreeDirtyException.ErrorCode, task.ErrorMessage);
+        Assert.Equal(sourceCommit, branch.LastCommitId);
+        Assert.Equal("existing-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Single(await context.DocCatalogs.ToListAsync());
+        Assert.Empty(await context.RepositoryGenerationLocks.ToListAsync());
+        Assert.False(Directory.Exists(Path.Combine(
+            repositoriesRoot,
+            repository.OrgName,
+            repository.RepoName,
+            "branches",
+            sourceBranch,
+            "tree")));
+        wikiGenerator.VerifyNoOtherCalls();
+        skillBuilder.VerifyNoOtherCalls();
+        notificationService.VerifyNoOtherCalls();
         analyzer.VerifyAll();
     }
 
@@ -617,7 +768,8 @@ public class IncrementalUpdateWorkerTests
         TestDbContext context,
         IIncrementalUpdateService updateService,
         IRepositoryGenerationLockService lockService,
-        IncrementalUpdateTask task)
+        IncrementalUpdateTask task,
+        IRepositoryAnalyzer? repositoryAnalyzer = null)
     {
         var method = typeof(IncrementalUpdateWorker).GetMethod(
             "ProcessSingleTaskAsync",
@@ -628,6 +780,7 @@ public class IncrementalUpdateWorkerTests
             [
                 context,
                 updateService,
+                repositoryAnalyzer ?? Mock.Of<IRepositoryAnalyzer>(MockBehavior.Strict),
                 lockService,
                 new GenerationWriteGuard(Options.Create(new IncrementalUpdateOptions())),
                 task,
@@ -664,6 +817,13 @@ public class IncrementalUpdateWorkerTests
         "untracked" => new LocalGitPreflightResult(true, GitCommitA, [], [], ["untracked.cs"]),
         _ => throw new ArgumentOutOfRangeException(nameof(dirtyKind))
     };
+
+    private static string CreateTempDirectory()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "OpenDeepWiki.Tests", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(path);
+        return path;
+    }
 
     private static TestDbContext CreateContext()
     {

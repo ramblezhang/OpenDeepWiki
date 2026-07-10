@@ -156,6 +156,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
             var previousCommitId = branch.LastCommitId;
             var workspace = await PrepareWorkspaceWithRetryAsync(
                 repository, branch.BranchName, previousCommitId, cancellationToken);
+            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
             var currentCommitId = workspace.CommitId;
 
             if (previousCommitId == currentCommitId)
@@ -208,6 +209,9 @@ public class IncrementalUpdateService : IIncrementalUpdateService
 
             var updatedDocumentsCount = 0;
 
+            // Revalidate immediately before the first fenced document/catalog write.
+            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+
             foreach (var branchLanguage in branchLanguages)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -250,6 +254,10 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                     ChangedFiles = changedFiles
                 },
                 cancellationToken);
+
+            // The worker persists Completed after this method returns. Keep that final
+            // fenced transition behind a fresh source preflight as well.
+            await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
 
             stopwatch.Stop();
 
@@ -363,6 +371,9 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         CancellationToken cancellationToken,
         GenerationLeaseHandle? lease)
     {
+        // Keep the final baseline persistence behind a fresh local-source check.
+        await ThrowIfLocalGitDirtyAsync(repository, cancellationToken);
+
         branch.LastCommitId = currentCommitId;
         branch.LastProcessedAt = DateTime.UtcNow;
         branch.UpdatedAt = DateTime.UtcNow;
@@ -417,6 +428,10 @@ public class IncrementalUpdateService : IIncrementalUpdateService
             {
                 return await _repositoryAnalyzer.PrepareWorkspaceAsync(
                     repository, branchName, previousCommitId, cancellationToken);
+            }
+            catch (LocalGitWorktreeDirtyException)
+            {
+                throw;
             }
             catch (Exception ex)
             {

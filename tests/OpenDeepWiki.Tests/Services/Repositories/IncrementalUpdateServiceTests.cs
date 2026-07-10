@@ -182,6 +182,101 @@ public class IncrementalUpdateServiceTests
         notificationService.VerifyAll();
     }
 
+    [Theory]
+    [InlineData(3, false)]
+    [InlineData(4, true)]
+    public async Task ProcessIncrementalUpdateAsync_WhenSourceBecomesDirtyBeforeFencedWrite_PreservesBaseline(
+        int dirtyPreflightNumber,
+        bool wikiUpdateExpected)
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(
+            context,
+            generateSkill: false,
+            RepositorySource.EncodeLocalDirectoryPath("/tmp/racing-local-git"));
+        var branch = SeedBranch(context, repository.Id, "main", "old-sha");
+        var language = SeedBranchLanguage(context, branch.Id, "zh");
+        var doc = new DocFile
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Content = "existing-doc"
+        };
+        context.DocFiles.Add(doc);
+        context.DocCatalogs.Add(new DocCatalog
+        {
+            Id = Guid.NewGuid().ToString(),
+            BranchLanguageId = language.Id,
+            Title = "Existing",
+            Path = "existing",
+            DocFileId = doc.Id
+        });
+        await context.SaveChangesAsync();
+
+        var clean = new LocalGitPreflightResult(true, "new-sha", [], [], []);
+        var dirty = new LocalGitPreflightResult(true, "new-sha", [], [], ["raced.txt"]);
+        var preflightChecks = 0;
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(item => item.GetLocalGitPreflightAsync(repository, It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => Interlocked.Increment(ref preflightChecks) == dirtyPreflightNumber
+                ? dirty
+                : clean);
+        analyzer
+            .Setup(item => item.PrepareWorkspaceAsync(
+                repository,
+                branch.BranchName,
+                "old-sha",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RepositoryWorkspace
+            {
+                Organization = repository.OrgName,
+                RepositoryName = repository.RepoName,
+                BranchName = branch.BranchName,
+                WorkingDirectory = "/tmp/prepared-workspace",
+                CommitId = "new-sha",
+                PreviousCommitId = "old-sha",
+                SupportsIncrementalUpdates = true
+            });
+        analyzer
+            .Setup(item => item.GetChangedFilesAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                "old-sha",
+                "new-sha",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["src/app.cs"]);
+
+        var wikiGenerator = new Mock<IWikiGenerator>(MockBehavior.Strict);
+        if (wikiUpdateExpected)
+        {
+            wikiGenerator
+                .Setup(item => item.IncrementalUpdateAsync(
+                    It.IsAny<RepositoryWorkspace>(),
+                    language,
+                    It.Is<string[]>(files => files.SequenceEqual(new[] { "src/app.cs" })),
+                    It.IsAny<CancellationToken>()))
+                .Returns(Task.CompletedTask);
+        }
+
+        var notificationService = new Mock<ISubscriberNotificationService>(MockBehavior.Strict);
+        var service = CreateService(
+            context,
+            analyzer,
+            wikiGenerator,
+            notificationService);
+
+        await Assert.ThrowsAsync<LocalGitWorktreeDirtyException>(
+            () => service.ProcessIncrementalUpdateAsync(repository.Id, branch.Id));
+
+        Assert.Equal(dirtyPreflightNumber, preflightChecks);
+        Assert.Equal("old-sha", branch.LastCommitId);
+        Assert.Equal("existing-doc", (await context.DocFiles.SingleAsync()).Content);
+        Assert.Single(await context.DocCatalogs.ToListAsync());
+        wikiGenerator.VerifyAll();
+        notificationService.VerifyNoOtherCalls();
+        analyzer.VerifyAll();
+    }
+
     [Fact]
     public async Task ProcessIncrementalUpdateAsync_WhenCommitAdvancesWithoutChangedFiles_StillAdvancesStoredCommit()
     {
