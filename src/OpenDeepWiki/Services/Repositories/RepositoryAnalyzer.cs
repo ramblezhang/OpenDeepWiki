@@ -1224,27 +1224,37 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
 
         foreach (var path in paths)
         {
-            AddSafeDirectory(safeDirectories, seen, path);
-
             if (string.IsNullOrWhiteSpace(path))
             {
                 continue;
             }
 
-            var normalizedPath = NormalizeLocalPath(path);
-            var gitPath = Path.Combine(normalizedPath, ".git");
-            if (File.Exists(gitPath) || Directory.Exists(gitPath))
+            var candidates = new List<string> { NormalizeLocalPath(path) };
+            var resolvedPath = TryResolveFinalLinkTarget(candidates[0]);
+            if (resolvedPath is not null &&
+                !PathsEqual(candidates[0], resolvedPath))
             {
-                AddSafeDirectory(safeDirectories, seen, gitPath);
+                candidates.Add(resolvedPath);
             }
 
-            if (TryResolveGitDirPointer(gitPath, normalizedPath, out var gitDir))
+            foreach (var candidate in candidates)
             {
-                AddSafeDirectory(safeDirectories, seen, gitDir);
+                AddSafeDirectory(safeDirectories, seen, candidate);
 
-                if (TryResolveGitCommonDir(gitDir, out var commonGitDir))
+                var gitPath = Path.Combine(candidate, ".git");
+                if (File.Exists(gitPath) || Directory.Exists(gitPath))
                 {
-                    AddSafeDirectory(safeDirectories, seen, commonGitDir);
+                    AddSafeDirectory(safeDirectories, seen, gitPath);
+                }
+
+                if (TryResolveGitDirPointer(gitPath, candidate, out var gitDir))
+                {
+                    AddSafeDirectory(safeDirectories, seen, gitDir);
+
+                    if (TryResolveGitCommonDir(gitDir, out var commonGitDir))
+                    {
+                        AddSafeDirectory(safeDirectories, seen, commonGitDir);
+                    }
                 }
             }
         }
@@ -1349,7 +1359,30 @@ public class RepositoryAnalyzer : IRepositoryAnalyzer
 
     private static bool LocalPathEquals(string pathA, string pathB)
     {
-        return PathsEqual(NormalizeLocalPath(pathA), NormalizeLocalPath(pathB));
+        var normalizedPathA = NormalizeLocalPath(pathA);
+        var normalizedPathB = NormalizeLocalPath(pathB);
+        return PathsEqual(normalizedPathA, normalizedPathB) ||
+               PathsEqual(
+                   TryResolveFinalLinkTarget(normalizedPathA) ?? normalizedPathA,
+                   TryResolveFinalLinkTarget(normalizedPathB) ?? normalizedPathB);
+    }
+
+    private static string? TryResolveFinalLinkTarget(string normalizedPath)
+    {
+        try
+        {
+            FileSystemInfo? fileSystemInfo = Directory.Exists(normalizedPath)
+                ? new DirectoryInfo(normalizedPath)
+                : File.Exists(normalizedPath)
+                    ? new FileInfo(normalizedPath)
+                    : null;
+            var target = fileSystemInfo?.ResolveLinkTarget(returnFinalTarget: true);
+            return target is null ? null : NormalizeLocalPath(target.FullName);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
+        }
     }
 
     private static bool PathsEqual(string normalizedPathA, string normalizedPathB)

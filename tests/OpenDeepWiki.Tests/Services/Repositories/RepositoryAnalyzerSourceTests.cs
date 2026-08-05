@@ -481,6 +481,39 @@ public class RepositoryAnalyzerSourceTests
     }
 
     [Fact]
+    public async Task LocalGitSourceThroughDirectoryLink_ResolvesPhysicalWorktreeAndBranchHead()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var repositoriesRoot = CreateTempDirectory();
+        var sourceRoot = CreateTempDirectory();
+        var linkParent = CreateTempDirectory();
+        var linkPath = Path.Combine(linkParent, "linked-source");
+        var (_, expectedCommit) = CreateGitRepositoryWithBranches(
+            sourceRoot,
+            "smart-hw/os_services_develop",
+            "smart-hw/rv1106_develop");
+        Directory.CreateSymbolicLink(linkPath, sourceRoot);
+
+        var safeDirectories = InvokeBuildGitCliSafeDirectories(linkPath)
+            .Select(NormalizePath)
+            .ToArray();
+        var analyzer = CreateAnalyzer(repositoriesRoot);
+        var repository = CreateLocalSourceRepository(linkPath);
+
+        var remoteHead = await analyzer.GetRemoteBranchHeadCommitAsync(
+            repository,
+            "smart-hw/rv1106_develop");
+
+        Assert.Contains(NormalizePath(linkPath), safeDirectories);
+        Assert.Contains(NormalizePath(sourceRoot), safeDirectories);
+        Assert.Equal(expectedCommit, remoteHead);
+    }
+
+    [Fact]
     public void BuildGitCliUploadPackArgument_IncludesSafeDirectoriesBeforeUploadPack()
     {
         var sourceRoot = NormalizePath(Path.Combine(CreateTempDirectory(), "source with space"));
