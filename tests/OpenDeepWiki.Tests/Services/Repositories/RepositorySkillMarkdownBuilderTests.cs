@@ -7,7 +7,7 @@ namespace OpenDeepWiki.Tests.Services.Repositories;
 public class RepositorySkillMarkdownBuilderTests
 {
     [Fact]
-    public void BuildSkillMarkdown_ShouldCreateEnglishDescriptorAndDocumentIndex()
+    public void BuildSkillMarkdown_ShouldCreateEnglishDescriptorAndLeafDocumentIndex()
     {
         var builder = new RepositorySkillMarkdownBuilder();
         var repository = new Repository
@@ -58,7 +58,7 @@ public class RepositorySkillMarkdownBuilderTests
         Assert.Contains("description: \"Generated repository documentation skill for AIDotNet/OpenDeepWiki.\"", markdown);
         Assert.Contains("Documentation language: `zh`", markdown);
         Assert.Contains("Use this skill when answering questions", markdown);
-        Assert.Contains("- [Overview](references/docs/Overview.md)", markdown);
+        Assert.DoesNotContain("- [Overview](references/docs/Overview.md)", markdown);
         Assert.Contains("  - [API Guide](references/docs/Overview/API%20Guide.md)", markdown);
     }
 
