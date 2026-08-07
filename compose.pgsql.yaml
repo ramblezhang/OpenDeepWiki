@@ -59,8 +59,11 @@ services:
       # Wiki 生成并行数 (默认: 5)
       - WIKI_PARALLEL_COUNT=5
 
-      # 多语言支持 (逗号分隔，如: en,zh,ja,ko)
-      - WIKI_LANGUAGES=en,zh
+      # 多语言支持 (逗号分隔，例如: zh,en)
+      - WIKI_LANGUAGES=${WIKI_LANGUAGES:-zh}
+
+      # Incremental update worker (set INCREMENTAL_UPDATE_ENABLED=false to pause scheduled scans)
+      - IncrementalUpdate__Enabled=${INCREMENTAL_UPDATE_ENABLED:-true}
     volumes:
       - ./data:/data
 

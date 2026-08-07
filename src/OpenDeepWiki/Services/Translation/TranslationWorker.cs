@@ -65,7 +65,8 @@ public class TranslationWorker : BackgroundService
         var wikiGenerator = scope.ServiceProvider.GetService<IWikiGenerator>();
         var processingLogService = scope.ServiceProvider.GetService<IProcessingLogService>();
         var skillMarkdownBuilder = scope.ServiceProvider.GetService<IRepositorySkillMarkdownBuilder>();
-        var wikiOptions = scope.ServiceProvider.GetService<IOptions<WikiGeneratorOptions>>()?.Value;
+        var wikiOptions = scope.ServiceProvider.GetService<IOptionsMonitor<WikiGeneratorOptions>>()?.CurrentValue
+                          ?? scope.ServiceProvider.GetService<IOptions<WikiGeneratorOptions>>()?.Value;
 
         if (translationService == null || context == null || repositoryAnalyzer == null ||
             wikiGenerator == null || wikiOptions == null)

@@ -74,6 +74,84 @@ public class IncrementalUpdateWorkerTests
         analyzer.VerifyAll();
     }
 
+    [Theory]
+    [InlineData(IncrementalUpdateStatus.Failed)]
+    [InlineData(IncrementalUpdateStatus.Cancelled)]
+    public async Task CheckScheduledUpdatesAsync_WhenTerminalTaskHasSameTargetCommit_DoesNotCreateDuplicate(
+        IncrementalUpdateStatus terminalStatus)
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, updateIntervalMinutes: 60, lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", "old-sha");
+        context.IncrementalUpdateTasks.Add(new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            PreviousCommitId = "old-sha",
+            TargetCommitId = "new-sha",
+            Status = terminalStatus,
+            IsManualTrigger = false,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            CompletedAt = DateTime.UtcNow.AddMinutes(-5)
+        });
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync("new-sha");
+
+        await InvokeCheckScheduledUpdatesAsync(
+            CreateWorker(),
+            context,
+            Mock.Of<IGitPlatformService>(),
+            analyzer.Object);
+
+        var tasks = await context.IncrementalUpdateTasks.ToListAsync();
+        Assert.Single(tasks);
+        Assert.Equal(terminalStatus, tasks[0].Status);
+        Assert.True((await context.Repositories.SingleAsync()).LastUpdateCheckAt > DateTime.UtcNow.AddMinutes(-1));
+        analyzer.VerifyAll();
+    }
+
+    [Fact]
+    public async Task CheckScheduledUpdatesAsync_WhenOnlyManualTerminalTaskExists_CreatesScheduledTask()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, updateIntervalMinutes: 60, lastUpdateCheckAt: DateTime.UtcNow.AddHours(-2));
+        var branch = SeedBranch(context, repository.Id, "main", "old-sha");
+        context.IncrementalUpdateTasks.Add(new IncrementalUpdateTask
+        {
+            Id = Guid.NewGuid().ToString(),
+            RepositoryId = repository.Id,
+            BranchId = branch.Id,
+            PreviousCommitId = "old-sha",
+            TargetCommitId = "new-sha",
+            Status = IncrementalUpdateStatus.Failed,
+            IsManualTrigger = true,
+            CreatedAt = DateTime.UtcNow.AddMinutes(-10),
+            CompletedAt = DateTime.UtcNow.AddMinutes(-5)
+        });
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.GetRemoteBranchHeadCommitAsync(repository, branch.BranchName, It.IsAny<CancellationToken>()))
+            .ReturnsAsync("new-sha");
+
+        await InvokeCheckScheduledUpdatesAsync(
+            CreateWorker(),
+            context,
+            Mock.Of<IGitPlatformService>(),
+            analyzer.Object);
+
+        var tasks = await context.IncrementalUpdateTasks.OrderBy(item => item.IsManualTrigger).ToListAsync();
+        Assert.Equal(2, tasks.Count);
+        Assert.Contains(tasks, item => !item.IsManualTrigger && item.Status == IncrementalUpdateStatus.Pending);
+        analyzer.VerifyAll();
+    }
+
     [Fact]
     public async Task CheckScheduledUpdatesAsync_WhenLocalGitSourceHasSnapshotBaseline_NormalizesWithoutTask()
     {

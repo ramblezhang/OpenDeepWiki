@@ -7,6 +7,7 @@ using OpenAI.Responses;
 using Azure.AI.OpenAI;
 using System;
 using System.ClientModel;
+using System.Text.Json;
 using Anthropic;
 
 #pragma warning disable OPENAI001
@@ -111,6 +112,7 @@ namespace OpenDeepWiki.Agents
                 case AiRequestType.OpenAIResponses:
                 {
                     var apiKey = ResolveRequiredApiKey(option);
+                    ApplyOpenAIResponsesThinkingConfig(clientAgentOptions, option);
                     var clientOptions = new OpenAIClientOptions
                     {
                         Endpoint = new Uri(option.Endpoint ?? DefaultEndpoint),
@@ -219,6 +221,108 @@ namespace OpenDeepWiki.Agents
 
             throw new InvalidOperationException(
                 "AI API key is not configured. Configure an AI provider and bind a model in system settings.");
+        }
+
+        internal static void ApplyOpenAIResponsesThinkingConfig(
+            ChatClientAgentOptions clientAgentOptions,
+            AiRequestOptions options)
+        {
+            var reasoningEffort = TryResolveOpenAIResponsesReasoningEffort(options);
+            if (reasoningEffort is not { } configuredReasoningEffort)
+            {
+                return;
+            }
+
+            clientAgentOptions.ChatOptions ??= new ChatOptions();
+            var chatOptions = clientAgentOptions.ChatOptions!;
+
+            // A caller-provided reasoning setting takes precedence over model defaults.
+            if (chatOptions.Reasoning is not null)
+            {
+                return;
+            }
+
+            var originalRawRepresentationFactory = chatOptions.RawRepresentationFactory;
+            chatOptions.RawRepresentationFactory = underlyingClient =>
+            {
+                var rawRepresentation = originalRawRepresentationFactory?.Invoke(underlyingClient);
+                if (rawRepresentation is not null and not CreateResponseOptions)
+                {
+                    return rawRepresentation;
+                }
+
+                var responseOptions = rawRepresentation as CreateResponseOptions ?? new CreateResponseOptions();
+                if (responseOptions.ReasoningOptions is null)
+                {
+                    responseOptions.ReasoningOptions = new ResponseReasoningOptions
+                    {
+                        ReasoningEffortLevel = new ResponseReasoningEffortLevel(configuredReasoningEffort)
+                    };
+                }
+
+                return responseOptions;
+            };
+        }
+
+        private static string? TryResolveOpenAIResponsesReasoningEffort(AiRequestOptions options)
+        {
+            if (!options.SupportsThinking || string.IsNullOrWhiteSpace(options.ThinkingConfigJson))
+            {
+                return null;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(options.ThinkingConfigJson);
+                var config = document.RootElement;
+                if (config.ValueKind != JsonValueKind.Object)
+                {
+                    return null;
+                }
+
+                var bodyParamsName = options.ThinkingEnabled == false
+                    ? "disabledBodyParams"
+                    : "bodyParams";
+                if (config.TryGetProperty(bodyParamsName, out var bodyParams) &&
+                    bodyParams.ValueKind == JsonValueKind.Object &&
+                    TryReadSupportedReasoningEffort(bodyParams, "reasoning_effort") is { } bodyEffort)
+                {
+                    return bodyEffort;
+                }
+
+                if (options.ThinkingEnabled != false &&
+                    TryReadSupportedReasoningEffort(config, "defaultReasoningEffort") is { } defaultEffort)
+                {
+                    return defaultEffort;
+                }
+            }
+            catch (JsonException)
+            {
+                // Malformed model metadata should not prevent agent creation.
+            }
+
+            return null;
+        }
+
+        private static string? TryReadSupportedReasoningEffort(
+            JsonElement container,
+            string propertyName)
+        {
+            if (!container.TryGetProperty(propertyName, out var value) ||
+                value.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            var candidate = value.GetString()?.Trim().ToLowerInvariant();
+            return candidate is not null && IsSupportedReasoningEffort(candidate)
+                ? candidate
+                : null;
+        }
+
+        private static bool IsSupportedReasoningEffort(string value)
+        {
+            return value is "none" or "minimal" or "low" or "medium" or "high" or "xhigh" or "max";
         }
 
         private static AiRequestType? TryParseRequestType(string? requestType)

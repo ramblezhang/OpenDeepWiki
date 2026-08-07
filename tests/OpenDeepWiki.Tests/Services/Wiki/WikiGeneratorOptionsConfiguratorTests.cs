@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using OpenDeepWiki.Services.Wiki;
 using Xunit;
@@ -6,6 +7,45 @@ namespace OpenDeepWiki.Tests.Services.Wiki;
 
 public class WikiGeneratorOptionsConfiguratorTests
 {
+    [Fact]
+    public void DefaultLanguages_ShouldBeChinese()
+    {
+        Assert.Equal("zh", new WikiGeneratorOptions().Languages);
+    }
+
+    [Fact]
+    public void Apply_ShouldUseLegacyWikiLanguagesEnvironmentVariable()
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["WIKI_LANGUAGES"] = "zh,en"
+        });
+
+        var options = new WikiGeneratorOptions();
+
+        WikiGeneratorOptionsConfigurator.Apply(options, configuration);
+
+        Assert.Equal("zh,en", options.Languages);
+    }
+
+    [Fact]
+    public async Task InitializeDefaultsAsync_ShouldPersistLegacyWikiLanguagesEnvironmentVariable()
+    {
+        await using var context = OpenDeepWiki.Tests.Chat.Sessions.TestDbContext.Create();
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["WIKI_LANGUAGES"] = "en"
+        });
+
+        await OpenDeepWiki.Services.Admin.SystemSettingDefaults.InitializeDefaultsAsync(
+            configuration,
+            context);
+
+        var setting = await context.SystemSettings
+            .SingleAsync(item => item.Key == "WIKI_LANGUAGES");
+        Assert.Equal("en", setting.Value);
+    }
+
     [Fact]
     public void Apply_ShouldBindWikiTasks_FromProviderModelSettings()
     {

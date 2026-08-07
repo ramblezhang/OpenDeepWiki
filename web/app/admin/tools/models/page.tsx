@@ -27,6 +27,8 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelIcon, ProviderIcon } from "@/components/admin/provider-icons";
+import { ModelThinkingConfig } from "@/components/admin/model-thinking-config";
+import { isGptModelId } from "@/lib/thinking-config";
 import { cn } from "@/lib/utils";
 import {
   AiModelConfig,
@@ -839,6 +841,20 @@ export default function AdminAiModelsPage() {
               </div>
             </section>
 
+            {isGptModelId(modelForm.modelId) && (
+              <section className="rounded-2xl border bg-background p-4">
+                <ModelThinkingConfig
+                  modelId={modelForm.modelId}
+                  supportsThinking={modelForm.supportsThinking}
+                  value={modelForm.thinkingConfigJson}
+                  onChange={(thinkingConfigJson) =>
+                    setModelForm({ ...modelForm, thinkingConfigJson })
+                  }
+                  textareaClassName="min-h-32"
+                />
+              </section>
+            )}
+
             <section className="rounded-2xl border bg-background px-4">
               <Accordion type="single" collapsible>
                 <AccordionItem value="advanced">
@@ -856,12 +872,17 @@ export default function AdminAiModelsPage() {
                         onChange={(event) => setModelForm({ ...modelForm, capabilitiesJson: event.target.value })}
                         className="min-h-32 font-mono text-xs"
                       />
-                      <Textarea
-                        placeholder="Thinking Config JSON"
-                        value={modelForm.thinkingConfigJson}
-                        onChange={(event) => setModelForm({ ...modelForm, thinkingConfigJson: event.target.value })}
-                        className="min-h-32 font-mono text-xs"
-                      />
+                      {!isGptModelId(modelForm.modelId) && (
+                        <ModelThinkingConfig
+                          modelId={modelForm.modelId}
+                          supportsThinking={modelForm.supportsThinking}
+                          value={modelForm.thinkingConfigJson}
+                          onChange={(thinkingConfigJson) =>
+                            setModelForm({ ...modelForm, thinkingConfigJson })
+                          }
+                          textareaClassName="min-h-32"
+                        />
+                      )}
                       <Textarea
                         placeholder="Request Overrides JSON"
                         value={modelForm.requestOverridesJson}

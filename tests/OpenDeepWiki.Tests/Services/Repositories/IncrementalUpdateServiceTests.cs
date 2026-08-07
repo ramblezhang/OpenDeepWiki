@@ -183,6 +183,120 @@ public class IncrementalUpdateServiceTests
     }
 
     [Fact]
+    public async Task ProcessIncrementalUpdateAsync_ProcessesOnlyConfiguredLanguages()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, generateSkill: false);
+        var branch = SeedBranch(context, repository.Id, "main", "old-sha");
+        var zhLanguage = SeedBranchLanguage(context, branch.Id, "zh");
+        var enLanguage = SeedBranchLanguage(context, branch.Id, "en");
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.PrepareWorkspaceAsync(repository, branch.BranchName, "old-sha", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RepositoryWorkspace
+            {
+                Organization = repository.OrgName,
+                RepositoryName = repository.RepoName,
+                BranchName = branch.BranchName,
+                WorkingDirectory = "C:\\temp\\repo",
+                CommitId = "new-sha",
+                PreviousCommitId = "old-sha"
+            });
+        analyzer
+            .Setup(x => x.GetChangedFilesAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                "old-sha",
+                "new-sha",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["src/app.cs"]);
+
+        var wikiGenerator = new Mock<IWikiGenerator>(MockBehavior.Strict);
+        wikiGenerator
+            .Setup(x => x.IncrementalUpdateAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                It.Is<BranchLanguage>(language => language.Id == zhLanguage.Id),
+                It.IsAny<string[]>(),
+                It.IsAny<CancellationToken>(),
+                null,
+                null))
+            .Returns(Task.CompletedTask);
+
+        var service = CreateService(
+            context,
+            analyzer: analyzer,
+            wikiGenerator: wikiGenerator,
+            wikiOptions: new WikiGeneratorOptions { Languages = " zh " });
+
+        var result = await service.ProcessIncrementalUpdateAsync(repository.Id, branch.Id);
+
+        Assert.True(result.Success);
+        Assert.Equal(1, result.UpdatedDocumentsCount);
+        wikiGenerator.Verify(
+            x => x.IncrementalUpdateAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                It.Is<BranchLanguage>(language => language.Id == zhLanguage.Id),
+                It.IsAny<string[]>(),
+                It.IsAny<CancellationToken>(),
+                null,
+                null),
+            Times.Once);
+        wikiGenerator.Verify(
+            x => x.IncrementalUpdateAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                It.Is<BranchLanguage>(language => language.Id == enLanguage.Id),
+                It.IsAny<string[]>(),
+                It.IsAny<CancellationToken>(),
+                null,
+                null),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task ProcessIncrementalUpdateAsync_WhenNoConfiguredLanguageMatches_FailsWithoutAdvancingBaseline()
+    {
+        using var context = CreateContext();
+        var repository = SeedRepository(context, generateSkill: false);
+        var branch = SeedBranch(context, repository.Id, "main", "old-sha");
+        SeedBranchLanguage(context, branch.Id, "en");
+        await context.SaveChangesAsync();
+
+        var analyzer = new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
+        analyzer
+            .Setup(x => x.PrepareWorkspaceAsync(repository, branch.BranchName, "old-sha", It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new RepositoryWorkspace
+            {
+                Organization = repository.OrgName,
+                RepositoryName = repository.RepoName,
+                BranchName = branch.BranchName,
+                WorkingDirectory = "C:\\temp\\repo",
+                CommitId = "new-sha",
+                PreviousCommitId = "old-sha"
+            });
+        analyzer
+            .Setup(x => x.GetChangedFilesAsync(
+                It.IsAny<RepositoryWorkspace>(),
+                "old-sha",
+                "new-sha",
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(["src/app.cs"]);
+
+        var service = CreateService(
+            context,
+            analyzer: analyzer,
+            wikiOptions: new WikiGeneratorOptions { Languages = "zh" });
+
+        var result = await service.ProcessIncrementalUpdateAsync(repository.Id, branch.Id);
+
+        Assert.False(result.Success);
+        Assert.Contains("No configured languages match", result.ErrorMessage, StringComparison.Ordinal);
+        var persistedBranch = await context.RepositoryBranches.SingleAsync(item => item.Id == branch.Id);
+        Assert.Equal("old-sha", persistedBranch.LastCommitId);
+        Assert.Null(persistedBranch.LastProcessedAt);
+    }
+
+    [Fact]
     public async Task ProcessIncrementalUpdateAsync_LocalGitWithLease_PublishesDraftAtomically()
     {
         using var context = CreateContext();
@@ -448,7 +562,8 @@ public class IncrementalUpdateServiceTests
         TestDbContext context,
         Mock<IRepositoryAnalyzer>? analyzer = null,
         Mock<IWikiGenerator>? wikiGenerator = null,
-        Mock<ISubscriberNotificationService>? notificationService = null)
+        Mock<ISubscriberNotificationService>? notificationService = null,
+        WikiGeneratorOptions? wikiOptions = null)
     {
         analyzer ??= new Mock<IRepositoryAnalyzer>(MockBehavior.Strict);
         wikiGenerator ??= new Mock<IWikiGenerator>(MockBehavior.Strict);
@@ -460,6 +575,11 @@ public class IncrementalUpdateServiceTests
                 .Returns(Task.CompletedTask);
         }
 
+        var wikiOptionsMonitor = new Mock<IOptionsMonitor<WikiGeneratorOptions>>();
+        wikiOptionsMonitor
+            .SetupGet(item => item.CurrentValue)
+            .Returns(wikiOptions ?? new WikiGeneratorOptions());
+
         return new IncrementalUpdateService(
             analyzer.Object,
             wikiGenerator.Object,
@@ -467,7 +587,8 @@ public class IncrementalUpdateServiceTests
             notificationService.Object,
             context,
             Options.Create(new IncrementalUpdateOptions()),
-            Mock.Of<ILogger<IncrementalUpdateService>>());
+            Mock.Of<ILogger<IncrementalUpdateService>>(),
+            wikiOptionsMonitor: wikiOptionsMonitor.Object);
     }
 
     private static TestDbContext CreateContext()

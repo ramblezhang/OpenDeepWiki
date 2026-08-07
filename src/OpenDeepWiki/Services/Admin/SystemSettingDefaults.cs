@@ -58,6 +58,11 @@ public static class SystemSettingDefaults
         var existingByKey = existingSettings.ToDictionary(s => s.Key);
         var wikiOptionDefaults = new WikiGeneratorOptions();
         configuration.GetSection(WikiGeneratorOptions.SectionName).Bind(wikiOptionDefaults);
+        // Keep legacy flat environment variables (notably WIKI_LANGUAGES)
+        // consistent with the options configurator. Otherwise the first
+        // startup would persist the property default and overwrite the
+        // environment-provided value when settings are applied below.
+        WikiGeneratorOptionsConfigurator.Apply(wikiOptionDefaults, configuration);
 
         var settingsToAdd = new List<SystemSetting>();
         var hasChanges = false;

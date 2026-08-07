@@ -676,6 +676,17 @@
     "models": "Models",
     "modelConfigs": "Model Configuration"
   },
+  "thinkingConfig": {
+    "label": "Thinking level",
+    "placeholder": "Select thinking level",
+    "advancedJson": "Advanced JSON",
+    "jsonPlaceholder": "Thinking Config JSON",
+    "thinkingDisabled": "Thinking is disabled. Enable Thinking first.",
+    "modelSupportHint": "Available levels depend on the model; check the model documentation.",
+    "editJsonHint": "View or edit the complete configuration in Advanced JSON.",
+    "invalidJson": "Thinking config JSON is invalid: {error}. Fix the Advanced JSON first.",
+    "unsupportedValue": "The configured value “{value}” is not in the available options. Adjust it in Advanced JSON."
+  },
   "models": {
     "title": "Model Management",
     "createModel": "Create Model",

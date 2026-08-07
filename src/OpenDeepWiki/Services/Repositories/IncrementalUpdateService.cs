@@ -23,6 +23,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
     private readonly ILogger<IncrementalUpdateService> _logger;
     private readonly IGenerationWriteGuard? _writeGuard;
     private readonly IIncrementalWikiPublisher? _wikiPublisher;
+    private readonly IOptionsMonitor<WikiGeneratorOptions>? _wikiOptionsMonitor;
 
     public IncrementalUpdateService(
         IRepositoryAnalyzer repositoryAnalyzer,
@@ -33,7 +34,8 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         IOptions<IncrementalUpdateOptions> options,
         ILogger<IncrementalUpdateService> logger,
         IGenerationWriteGuard? writeGuard = null,
-        IIncrementalWikiPublisher? wikiPublisher = null)
+        IIncrementalWikiPublisher? wikiPublisher = null,
+        IOptionsMonitor<WikiGeneratorOptions>? wikiOptionsMonitor = null)
     {
         _repositoryAnalyzer = repositoryAnalyzer;
         _wikiGenerator = wikiGenerator;
@@ -44,6 +46,7 @@ public class IncrementalUpdateService : IIncrementalUpdateService
         _logger = logger;
         _writeGuard = writeGuard;
         _wikiPublisher = wikiPublisher;
+        _wikiOptionsMonitor = wikiOptionsMonitor;
     }
 
     /// <inheritdoc />
@@ -241,9 +244,27 @@ public class IncrementalUpdateService : IIncrementalUpdateService
                 };
             }
 
-            var branchLanguages = await _context.BranchLanguages
+            var allowedLanguageCodes = GetAllowedLanguageCodes();
+            var branchLanguages = (await _context.BranchLanguages
                 .Where(bl => bl.RepositoryBranchId == branchId && !bl.IsDeleted)
-                .ToListAsync(cancellationToken);
+                .ToListAsync(cancellationToken))
+                .Where(bl => allowedLanguageCodes.Contains(bl.LanguageCode.Trim()))
+                .ToList();
+
+            // A changed commit must never be acknowledged when none of the
+            // branch languages are enabled by the current wiki configuration.
+            // Advancing the baseline here would permanently discard the
+            // incremental change without generating any wiki content.
+            if (branchLanguages.Count == 0)
+            {
+                var configuredLanguages = string.IsNullOrWhiteSpace(_wikiOptionsMonitor?.CurrentValue.Languages)
+                    ? "<none>"
+                    : _wikiOptionsMonitor!.CurrentValue.Languages!.Trim();
+                throw new InvalidOperationException(
+                    $"No configured languages match the branch languages. " +
+                    $"Configured: {configuredLanguages}; BranchId: {branchId}. " +
+                    "The incremental baseline was not advanced.");
+            }
 
             var updatedDocumentsCount = 0;
 
@@ -535,6 +556,21 @@ public class IncrementalUpdateService : IIncrementalUpdateService
 
         return (_writeGuard ?? throw new InvalidOperationException("Generation write guard is not configured."))
             .SaveChangesAsync(_context, lease, cancellationToken);
+    }
+
+    private HashSet<string> GetAllowedLanguageCodes()
+    {
+        var configuredLanguages = _wikiOptionsMonitor?.CurrentValue.Languages
+                                  ?? new WikiGeneratorOptions().Languages;
+        if (string.IsNullOrWhiteSpace(configuredLanguages))
+        {
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        return configuredLanguages
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(language => !string.IsNullOrWhiteSpace(language))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
     }
 
     private async Task<RepositoryWorkspace> PrepareWorkspaceWithRetryAsync(

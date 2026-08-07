@@ -20,6 +20,7 @@ import {
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { ModelIcon, ProviderIcon } from "@/components/admin/provider-icons";
+import { ModelThinkingConfig } from "@/components/admin/model-thinking-config";
 import { useTranslations } from "@/hooks/use-translations";
 import { cn } from "@/lib/utils";
 import {
@@ -1887,11 +1888,14 @@ export default function AdminAiProvidersPage() {
                 onChange={(event) => updateModelForm("capabilitiesJson", event.target.value)}
                 className="min-h-24 font-mono text-xs"
               />
-              <Textarea
-                placeholder="Thinking Config JSON"
+              <ModelThinkingConfig
+                modelId={modelForm.modelId}
+                supportsThinking={modelForm.supportsThinking}
                 value={modelForm.thinkingConfigJson}
-                onChange={(event) => updateModelForm("thinkingConfigJson", event.target.value)}
-                className="min-h-24 font-mono text-xs"
+                onChange={(thinkingConfigJson) =>
+                  updateModelForm("thinkingConfigJson", thinkingConfigJson)
+                }
+                textareaClassName="min-h-24"
               />
               <Textarea
                 placeholder="Request Overrides JSON"

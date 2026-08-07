@@ -671,6 +671,17 @@
     "enabled": "已启用",
     "disabled": "已禁用"
   },
+  "thinkingConfig": {
+    "label": "思考级别",
+    "placeholder": "选择思考级别",
+    "advancedJson": "高级 JSON",
+    "jsonPlaceholder": "Thinking Config JSON",
+    "thinkingDisabled": "Thinking 能力未开启，请先启用 Thinking。",
+    "modelSupportHint": "具体可用级别取决于模型，请以模型文档为准。",
+    "editJsonHint": "可在高级 JSON 中查看或编辑完整配置。",
+    "invalidJson": "思考配置 JSON 无效：{error}。请先修正高级 JSON。",
+    "unsupportedValue": "当前配置值“{value}”不在下拉选项中，请通过高级 JSON 调整。"
+  },
   "models": {
     "title": "模型管理",
     "createModel": "新增模型",

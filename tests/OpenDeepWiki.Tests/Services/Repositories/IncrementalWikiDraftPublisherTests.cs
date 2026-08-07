@@ -141,6 +141,74 @@ public class IncrementalWikiDraftPublisherTests
     }
 
     [Fact]
+    public async Task CleanPublish_InsertsNewDocumentsBeforeNestedCatalogsAndCatalogCas()
+    {
+        SqliteTestSupport.EnsureInitialized();
+        var databasePath = Path.Combine(Path.GetTempPath(), $"opendeepwiki-draft-new-fks-{Guid.NewGuid():N}.db");
+        var options = new DbContextOptionsBuilder<TestDbContext>()
+            .UseSqlite($"Data Source={databasePath};Default Timeout=5")
+            .Options;
+
+        await using (var context = new TestDbContext(options))
+        {
+            await context.Database.EnsureCreatedAsync();
+            var state = await SeedAsync(context);
+            var draft = new IncrementalWikiDraft(context, OldHead, 1024 * 1024, _ => Task.CompletedTask);
+            await draft.UpdateCatalogNodeAsync(
+                state.Language.Id,
+                "page",
+                new CatalogItem
+                {
+                    Title = "Root",
+                    Path = "page",
+                    Order = 1,
+                    Children =
+                    [
+                        new CatalogItem
+                        {
+                            Title = "New parent",
+                            Path = "new-parent",
+                            Order = 1,
+                            Children =
+                            [
+                                new CatalogItem
+                                {
+                                    Title = "New child",
+                                    Path = "new-child",
+                                    Order = 1
+                                }
+                            ]
+                        }
+                    ]
+                });
+
+            var mutation = await draft.WriteDocumentAsync(
+                state.Language.Id,
+                "new-child",
+                "new-child-content",
+                null);
+            Assert.Equal(DraftDocumentMutationStatus.Created, mutation.Status);
+
+            var analyzer = CleanAnalyzer(state.Repository, OldHead);
+            await CreatePublisher(context, analyzer.Object).PublishAsync(
+                draft,
+                state.Repository.Id,
+                state.Branch.Id,
+                OldHead,
+                NewHead,
+                state.Lease);
+
+            var child = await context.DocCatalogs.SingleAsync(item => item.Path == "new-child");
+            var parent = await context.DocCatalogs.SingleAsync(item => item.Path == "new-parent");
+            Assert.Equal(parent.Id, child.ParentId);
+            Assert.NotNull(child.DocFileId);
+            Assert.Equal("new-child-content", (await context.DocFiles.SingleAsync(item => item.Id == child.DocFileId)).Content);
+        }
+
+        File.Delete(databasePath);
+    }
+
+    [Fact]
     public async Task PublishException_RollsBackDraftBaselineAndTask()
     {
         SqliteTestSupport.EnsureInitialized();

@@ -641,6 +641,17 @@
     "enabled": "有効",
     "disabled": "無効"
   },
+  "thinkingConfig": {
+    "label": "思考レベル",
+    "placeholder": "思考レベルを選択",
+    "advancedJson": "詳細 JSON",
+    "jsonPlaceholder": "Thinking Config JSON",
+    "thinkingDisabled": "Thinking が無効です。先に Thinking を有効にしてください。",
+    "modelSupportHint": "利用できるレベルはモデルによって異なります。モデルのドキュメントを確認してください。",
+    "editJsonHint": "詳細 JSON で完全な設定を確認・編集できます。",
+    "invalidJson": "思考設定 JSON が無効です: {error}。先に詳細 JSON を修正してください。",
+    "unsupportedValue": "設定値「{value}」は選択肢にありません。詳細 JSON で調整してください。"
+  },
   "models": {
     "title": "モデル管理",
     "createModel": "モデル作成",

@@ -287,44 +287,20 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
     {
         foreach (var language in _languages.Values)
         {
-            foreach (var catalogId in language.ChangedCatalogIds)
-            {
-                var draftCatalog = language.Catalogs[catalogId];
-                if (language.CatalogOriginalVersions.TryGetValue(catalogId, out var originalVersion))
-                {
-                    if (!await UpdateCatalogWithCasAsync(
-                            publishContext,
-                            draftCatalog,
-                            originalVersion,
-                            cancellationToken))
-                    {
-                        throw new IncrementalWikiPublishConflictException(nameof(DocCatalog), catalogId);
-                    }
-                }
-                else
-                {
-                    if (await publishContext.DocCatalogs.AnyAsync(item => item.Id == catalogId, cancellationToken))
-                    {
-                        throw new IncrementalWikiPublishConflictException(nameof(DocCatalog), catalogId);
-                    }
+            var newDocuments = new List<DocFile>();
+            var newCatalogs = new List<DocCatalog>();
+            var documentUpdates = new List<(DocFile Draft, DraftRowVersion Original)>();
+            var catalogUpdates = new List<(DocCatalog Draft, DraftRowVersion Original)>();
 
-                    publishContext.DocCatalogs.Add(CloneCatalog(draftCatalog));
-                }
-            }
-
+            // Collect all mutations before writing. New catalogs may point at
+            // newly-created documents, so those documents must be persisted
+            // before any catalog FK is written.
             foreach (var documentId in language.ChangedDocumentIds)
             {
                 var draftDocument = language.Documents[documentId];
                 if (language.DocumentOriginalVersions.TryGetValue(documentId, out var originalVersion))
                 {
-                    if (!await UpdateDocumentWithCasAsync(
-                            publishContext,
-                            draftDocument,
-                            originalVersion,
-                            cancellationToken))
-                    {
-                        throw new IncrementalWikiPublishConflictException(nameof(DocFile), documentId);
-                    }
+                    documentUpdates.Add((draftDocument, originalVersion));
                 }
                 else
                 {
@@ -333,7 +309,75 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
                         throw new IncrementalWikiPublishConflictException(nameof(DocFile), documentId);
                     }
 
-                    publishContext.DocFiles.Add(CloneDocument(draftDocument));
+                    newDocuments.Add(CloneDocument(draftDocument));
+                }
+            }
+
+            foreach (var catalogId in language.ChangedCatalogIds)
+            {
+                var draftCatalog = language.Catalogs[catalogId];
+                if (language.CatalogOriginalVersions.TryGetValue(catalogId, out var originalVersion))
+                {
+                    catalogUpdates.Add((draftCatalog, originalVersion));
+                }
+                else
+                {
+                    if (await publishContext.DocCatalogs.AnyAsync(item => item.Id == catalogId, cancellationToken))
+                    {
+                        throw new IncrementalWikiPublishConflictException(nameof(DocCatalog), catalogId);
+                    }
+
+                    newCatalogs.Add(CloneCatalog(draftCatalog));
+                }
+            }
+
+            // Persist new document rows first. This also makes a new document
+            // available to a catalog CAS update in the same publish transaction.
+            if (newDocuments.Count > 0)
+            {
+                publishContext.DocFiles.AddRange(newDocuments);
+                await publishContext.SaveChangesAsync(cancellationToken);
+            }
+
+            // SQLite enforces the self-referencing ParentId FK immediately.
+            // Insert roots/parents before their descendants deterministically.
+            if (newCatalogs.Count > 0)
+            {
+                foreach (var batch in OrderCatalogInsertionBatches(newCatalogs))
+                {
+                    foreach (var catalog in batch)
+                    {
+                        publishContext.DocCatalogs.Add(catalog);
+                    }
+
+                    // Flush each depth batch so descendants never reference
+                    // an unpersisted parent under SQLite's immediate FK checks.
+                    await publishContext.SaveChangesAsync(cancellationToken);
+                }
+            }
+
+            // Existing rows are updated only after all new FK targets exist.
+            foreach (var (draftDocument, originalVersion) in documentUpdates)
+            {
+                if (!await UpdateDocumentWithCasAsync(
+                        publishContext,
+                        draftDocument,
+                        originalVersion,
+                        cancellationToken))
+                {
+                    throw new IncrementalWikiPublishConflictException(nameof(DocFile), draftDocument.Id);
+                }
+            }
+
+            foreach (var (draftCatalog, originalVersion) in catalogUpdates)
+            {
+                if (!await UpdateCatalogWithCasAsync(
+                        publishContext,
+                        draftCatalog,
+                        originalVersion,
+                        cancellationToken))
+                {
+                    throw new IncrementalWikiPublishConflictException(nameof(DocCatalog), draftCatalog.Id);
                 }
             }
         }
@@ -351,6 +395,37 @@ public sealed class IncrementalWikiDraft : IIncrementalWikiDraft
                 throw new IncrementalWikiPublishConflictException(nameof(BranchLanguage), languageId);
             }
         }
+    }
+
+    private static IReadOnlyList<IReadOnlyList<DocCatalog>> OrderCatalogInsertionBatches(
+        IEnumerable<DocCatalog> catalogs)
+    {
+        var pending = catalogs.ToDictionary(catalog => catalog.Id);
+        var batches = new List<IReadOnlyList<DocCatalog>>();
+
+        while (pending.Count > 0)
+        {
+            var ready = pending.Values
+                .Where(catalog => catalog.ParentId is null || !pending.ContainsKey(catalog.ParentId))
+                .OrderBy(catalog => catalog.ParentId is null ? 0 : 1)
+                .ThenBy(catalog => catalog.Order)
+                .ThenBy(catalog => catalog.Path, StringComparer.Ordinal)
+                .ThenBy(catalog => catalog.Id, StringComparer.Ordinal)
+                .ToList();
+
+            if (ready.Count == 0)
+            {
+                throw new InvalidOperationException("Draft catalog tree contains a cycle among new nodes.");
+            }
+
+            batches.Add(ready);
+            foreach (var catalog in ready)
+            {
+                pending.Remove(catalog.Id);
+            }
+        }
+
+        return batches;
     }
 
     private static async Task<bool> UpdateCatalogWithCasAsync(

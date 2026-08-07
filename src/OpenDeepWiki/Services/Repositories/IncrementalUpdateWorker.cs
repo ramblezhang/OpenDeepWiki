@@ -699,6 +699,21 @@ public class IncrementalUpdateWorker : BackgroundService
                         continue;
                     }
 
+                    if (await HasTerminalScheduledTaskAsync(
+                            context,
+                            repository.Id,
+                            branch.Id,
+                            targetCommitId: null,
+                            stoppingToken))
+                    {
+                        _logger.LogDebug(
+                            "Skipping scheduled update, terminal task already recorded. Repository: {Org}/{Repo}, Branch: {Branch}, TargetCommit: unknown",
+                            repository.OrgName,
+                            repository.RepoName,
+                            branch.BranchName);
+                        continue;
+                    }
+
                     CreateScheduledTask(context, repository, branch, branch.LastCommitId, null);
                     saveChanges = true;
                     continue;
@@ -708,6 +723,22 @@ public class IncrementalUpdateWorker : BackgroundService
                 {
                     _logger.LogDebug(
                         "Skipping scheduled update, remote HEAD unchanged. Repository: {Org}/{Repo}, Branch: {Branch}, Commit: {CommitId}",
+                        repository.OrgName,
+                        repository.RepoName,
+                        branch.BranchName,
+                        remoteCommitId);
+                    continue;
+                }
+
+                if (await HasTerminalScheduledTaskAsync(
+                        context,
+                        repository.Id,
+                        branch.Id,
+                        remoteCommitId,
+                        stoppingToken))
+                {
+                    _logger.LogDebug(
+                        "Skipping scheduled update, terminal task already recorded. Repository: {Org}/{Repo}, Branch: {Branch}, TargetCommit: {TargetCommit}",
                         repository.OrgName,
                         repository.RepoName,
                         branch.BranchName,
@@ -746,6 +777,28 @@ public class IncrementalUpdateWorker : BackgroundService
                 "Failed to create scheduled update tasks. Repository: {Org}/{Repo}",
                 repository.OrgName, repository.RepoName);
         }
+    }
+
+    private static async Task<bool> HasTerminalScheduledTaskAsync(
+        IContext context,
+        string repositoryId,
+        string branchId,
+        string? targetCommitId,
+        CancellationToken cancellationToken)
+    {
+        var query = context.IncrementalUpdateTasks
+            .Where(task => !task.IsDeleted &&
+                           !task.IsManualTrigger &&
+                           task.RepositoryId == repositoryId &&
+                           task.BranchId == branchId &&
+                           (task.Status == IncrementalUpdateStatus.Failed ||
+                            task.Status == IncrementalUpdateStatus.Cancelled));
+
+        query = targetCommitId is null
+            ? query.Where(task => task.TargetCommitId == null)
+            : query.Where(task => task.TargetCommitId == targetCommitId);
+
+        return await query.AnyAsync(cancellationToken);
     }
 
     private void NormalizeSnapshotBaseline(

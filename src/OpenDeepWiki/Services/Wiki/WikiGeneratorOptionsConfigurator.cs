@@ -39,16 +39,34 @@ public static class WikiGeneratorOptionsConfigurator
         options.Languages = ResolveStringValue(
             configuration,
             $"{WikiGeneratorOptions.SectionName}:Languages",
-            options.Languages);
+            options.Languages,
+            // Docker deployments historically exposed this setting as a flat
+            // WIKI_LANGUAGES variable. Keep that form working alongside the
+            // standard WikiGenerator__Languages binding.
+            "WIKI_LANGUAGES");
     }
 
     private static string? ResolveStringValue(
         IConfiguration configuration,
         string sectionKey,
-        string? fallbackValue)
+        string? fallbackValue,
+        params string[] aliases)
     {
-        return !string.IsNullOrWhiteSpace(configuration[sectionKey])
-            ? configuration[sectionKey]
+        var configuredValue = configuration[sectionKey];
+        if (string.IsNullOrWhiteSpace(configuredValue))
+        {
+            foreach (var alias in aliases)
+            {
+                configuredValue = configuration[alias];
+                if (!string.IsNullOrWhiteSpace(configuredValue))
+                {
+                    break;
+                }
+            }
+        }
+
+        return !string.IsNullOrWhiteSpace(configuredValue)
+            ? configuredValue
             : fallbackValue;
     }
 }
