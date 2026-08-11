@@ -96,6 +96,19 @@ public class WikiGeneratorOptions
     public int MaxCatalogSourceToolCalls { get; set; } = 4;
 
     /// <summary>
+    /// Maximum semantic attempts to persist a generated catalog. The first attempt
+    /// may inspect source files; repair attempts expose and require WriteCatalog only.
+    /// </summary>
+    public int MaxCatalogPersistenceAttempts { get; set; } = 3;
+
+    /// <summary>
+    /// Maximum semantic attempts to persist one document. This is independent
+    /// from transport retries and leaves room for a persistence-only repair after
+    /// source evidence has been collected.
+    /// </summary>
+    public int MaxDocumentPersistenceAttempts { get; set; } = 4;
+
+    /// <summary>
     /// Timeout in minutes for document generation tasks.
     /// Default: 30 minutes
     /// </summary>

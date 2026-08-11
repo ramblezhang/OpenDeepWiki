@@ -356,7 +356,7 @@ namespace OpenDeepWiki.Agents
             // Ensure tools are set in chat options
             clientAgentOptions.ChatOptions ??= new ChatOptions();
             clientAgentOptions.ChatOptions.Tools = tools;
-            clientAgentOptions.ChatOptions.ToolMode = ChatToolMode.Auto;
+            clientAgentOptions.ChatOptions.ToolMode ??= ChatToolMode.Auto;
             var agent = CreateAgentInternal(model, clientAgentOptions, option);
 
 

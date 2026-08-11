@@ -275,22 +275,13 @@ Remember to call WriteMindMapAsync with the complete mind map content.
             _logger.LogDebug("Initializing tools for catalog generation");
             var toolSnapshot = await CreateToolSnapshotAsync(cancellationToken);
             var gitTool = new GitTool(workspace.WorkingDirectory);
-            var sourceTool = new DocumentSourceToolBudget(gitTool, _options.MaxCatalogSourceToolCalls);
-            var catalogStorage = new CatalogStorage(_context, branchLanguage.Id);
-            var catalogTool = new CatalogTool(catalogStorage);
-            var tools = BuildTools(
-                sourceTool.GetTools().Concat(catalogTool.GetTools()),
-                toolSnapshot);
             _logger.LogInformation(
-                "Catalog generation tool budget. Repository: {Org}/{Repo}, Language: {Language}, SourceToolBudget: {SourceToolBudget}",
+                "Catalog generation budgets. Repository: {Org}/{Repo}, Language: {Language}, SourceToolBudget: {SourceToolBudget}, PersistenceAttempts: {PersistenceAttempts}",
                 workspace.Organization,
                 workspace.RepositoryName,
                 branchLanguage.LanguageCode,
-                _options.MaxCatalogSourceToolCalls);
-            _logger.LogDebug(
-                "Tools initialized. ToolCount: {ToolCount}, Tools: {ToolNames}",
-                tools.Length,
-                string.Join(", ", tools.Select(t => t.Name)));
+                _options.MaxCatalogSourceToolCalls,
+                _options.MaxCatalogPersistenceAttempts);
 
             var userMessage = $@"Generate Wiki catalog for the repository described in the runtime context.
 
@@ -321,28 +312,79 @@ Execute the workflow now. The runtime context already contains the directory tre
 {repoContext.ReadmeContent}";
 
             var catalogAi = await ResolveCatalogModelAsync(cancellationToken);
-            await ExecuteAgentWithRetryAsync(
-                catalogAi,
-                prompt,
-                userMessage,
-                tools,
-                "CatalogGeneration",
-                ProcessingStep.Catalog,
-                CreateWikiAiContext(
-                    "wiki_catalog_generation",
-                    "仓库目录生成",
-                    workspace,
-                    branchLanguage,
-                    modelId: catalogAi.ModelId),
-                cancellationToken);
+            var catalogItemCount = await CatalogPersistenceCoordinator.ExecuteAsync(
+                _options.MaxCatalogPersistenceAttempts,
+                async (attempt, isRepair, toolMode, ct) =>
+                {
+                    // A failed tool write can leave tracked entities behind. Each semantic
+                    // attempt therefore gets an isolated EF context and agent session.
+                    using var attemptContext = _contextFactory.CreateContext();
+                    var catalogStorage = new CatalogStorage(attemptContext, branchLanguage.Id);
+                    var catalogTool = new CatalogTool(catalogStorage);
+                    var catalogTools = catalogTool.GetTools();
+                    AITool[] attemptTools;
+                    string attemptMessage;
 
-            var catalogItemCount = await _context.DocCatalogs
-                .CountAsync(c => c.BranchLanguageId == branchLanguage.Id && !c.IsDeleted, cancellationToken);
-            if (catalogItemCount == 0)
-            {
-                throw new InvalidOperationException(
-                    $"Catalog generation completed without producing any catalog items for {workspace.Organization}/{workspace.RepositoryName} ({branchLanguage.LanguageCode}).");
-            }
+                    if (isRepair)
+                    {
+                        attemptTools =
+                        [
+                            catalogTools.Single(t => string.Equals(t.Name, "WriteCatalog", StringComparison.Ordinal))
+                        ];
+                        attemptMessage = $@"The previous catalog generation attempt completed without persisting any catalog items.
+
+Your only task now is to create a valid, focused catalog in {branchLanguage.LanguageCode} from the runtime context below and call WriteCatalog with the complete JSON catalog. You MUST call WriteCatalog. Do not return a text-only answer.
+
+{userMessage}";
+                    }
+                    else
+                    {
+                        var sourceTool = new DocumentSourceToolBudget(
+                            gitTool,
+                            _options.MaxCatalogSourceToolCalls,
+                            "call WriteCatalog with the complete catalog JSON, then finish");
+                        attemptTools = BuildTools(
+                            sourceTool.GetTools().Concat(catalogTools),
+                            toolSnapshot);
+                        attemptMessage = userMessage;
+                    }
+
+                    _logger.LogInformation(
+                        "Starting catalog persistence attempt {Attempt}/{MaxAttempts}. Repository: {Org}/{Repo}, ToolMode: {ToolMode}, Tools: {ToolNames}",
+                        attempt,
+                        Math.Max(1, _options.MaxCatalogPersistenceAttempts),
+                        workspace.Organization,
+                        workspace.RepositoryName,
+                        isRepair ? "Required(WriteCatalog)" : "Auto",
+                        string.Join(", ", attemptTools.Select(t => t.Name)));
+
+                    await ExecuteAgentWithRetryAsync(
+                        catalogAi,
+                        prompt,
+                        attemptMessage,
+                        attemptTools,
+                        isRepair ? "CatalogPersistenceRepair" : "CatalogGeneration",
+                        ProcessingStep.Catalog,
+                        CreateWikiAiContext(
+                            isRepair ? "wiki_catalog_persistence_repair" : "wiki_catalog_generation",
+                            isRepair ? "仓库目录持久化修复" : "仓库目录生成",
+                            workspace,
+                            branchLanguage,
+                            modelId: catalogAi.ModelId),
+                        ct,
+                        toolMode: toolMode);
+                },
+                async ct =>
+                {
+                    using var verificationContext = _contextFactory.CreateContext();
+                    return await verificationContext.DocCatalogs
+                        .AsNoTracking()
+                        .CountAsync(c => c.BranchLanguageId == branchLanguage.Id && !c.IsDeleted, ct);
+                },
+                async (attempt, ct) => await Task.Delay(CalculateRetryDelayMs(attempt), ct),
+                $"{workspace.Organization}/{workspace.RepositoryName} ({branchLanguage.LanguageCode})",
+                _logger,
+                cancellationToken);
 
             stopwatch.Stop();
             _logger.LogInformation(
@@ -925,17 +967,25 @@ Please start executing the task.";
 Please start executing the task.";
 
             var contentAi = await ResolveContentModelAsync(cancellationToken);
-            var persistenceAttempts = Math.Max(1, _options.MaxRetryAttempts);
+            var persistenceAttempts = Math.Max(1, _options.MaxDocumentPersistenceAttempts);
             Exception? lastPersistenceFailure = null;
+            var collectedSourceEvidence = new StringBuilder();
+            var gitTool = new GitTool(workspace.WorkingDirectory);
 
             for (var attempt = 1; attempt <= persistenceAttempts; attempt++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var isPersistenceRepair = attempt > 1;
+                var isWriteOnlyRepair = isPersistenceRepair && collectedSourceEvidence.Length > 0;
+                ChatToolMode attemptToolMode = isWriteOnlyRepair
+                    ? new RequiredChatToolMode("WriteDoc")
+                    : isPersistenceRepair
+                        ? new RequiredChatToolMode(requiredFunctionName: null)
+                        : ChatToolMode.Auto;
 
                 // Use a fresh context per retry; failed tool writes can leave tracked
                 // entities in a stale state even when SaveChanges did not persist.
                 using var context = _contextFactory.CreateContext();
-                var gitTool = new GitTool(workspace.WorkingDirectory);
                 var sourceTool = new DocumentSourceToolBudget(gitTool, _options.MaxDocumentSourceToolCalls);
                 var docTool = new DocTool(
                     context,
@@ -943,16 +993,48 @@ Please start executing the task.";
                     catalogPath,
                     gitTool,
                     _options.MaxDocumentAppendOperations);
-                var tools = BuildTools(
-                    sourceTool.GetTools().Concat(docTool.GetTools()),
-                    toolSnapshot);
+                var docTools = docTool.GetTools();
+                var tools = isWriteOnlyRepair
+                    ? new[]
+                    {
+                        docTools.Single(t => string.Equals(t.Name, "WriteDoc", StringComparison.Ordinal))
+                    }
+                    : BuildTools(
+                        sourceTool.GetTools().Concat(docTools),
+                        toolSnapshot);
+
+                var attemptMessage = isWriteOnlyRepair
+                    ? $@"Previous attempts collected the source evidence below but did not persist the document.
+
+Your only task is to call WriteDoc now with a focused, source-backed Markdown document. Do not return a text-only answer.
+
+Requirements:
+- Language: {branchLanguage.LanguageCode}
+- H1 title: {catalogTitle}
+- Length: 1500-3000 Chinese characters; keep it bounded
+- Include: purpose and scope, overview, one concise Mermaid diagram, key interfaces/workflow, one or two source-backed examples, failure/edge notes, and related source links
+- Use this file URL prefix for source links: {gitBaseUrl}
+- Do not invent facts that are absent from the collected evidence
+- Write the complete page in one WriteDoc call; do not append
+
+## Collected Source Evidence
+
+{collectedSourceEvidence}"
+                    : isPersistenceRepair
+                    ? $@"A previous attempt completed without persisting this document.
+
+Tool use is required on every turn of this repair attempt. Inspect only the minimum source evidence needed, then call WriteDoc with the document content. Do not return a text-only answer. If a source tool reports SOURCE_TOOL_BUDGET_REACHED, call WriteDoc immediately.
+
+{userMessage}"
+                    : userMessage;
 
                 _logger.LogInformation(
-                    "Starting document persistence attempt {Attempt}/{MaxAttempts}. Path: {Path}, Title: {Title}, SourceToolBudget: {SourceToolBudget}, AppendBudget: {AppendBudget}, MaxToolCalls: {MaxToolCalls}",
+                    "Starting document persistence attempt {Attempt}/{MaxAttempts}. Path: {Path}, Title: {Title}, ToolMode: {ToolMode}, SourceToolBudget: {SourceToolBudget}, AppendBudget: {AppendBudget}, MaxToolCalls: {MaxToolCalls}",
                     attempt,
                     persistenceAttempts,
                     catalogPath,
                     catalogTitle,
+                    isWriteOnlyRepair ? "Required(WriteDoc)" : isPersistenceRepair ? "Required" : "Auto",
                     _options.MaxDocumentSourceToolCalls,
                     _options.MaxDocumentAppendOperations,
                     _options.MaxDocumentToolCalls);
@@ -961,7 +1043,7 @@ Please start executing the task.";
                 await ExecuteAgentWithRetryAsync(
                     contentAi,
                     prompt,
-                    userMessage,
+                    attemptMessage,
                     tools,
                     $"DocumentContent:{catalogPath}",
                     ProcessingStep.Content,
@@ -973,12 +1055,26 @@ Please start executing the task.";
                         catalogPath,
                         contentAi.ModelId),
                     cancellationToken,
-                    maxToolCallsBeforeEarlyCompletion: _options.MaxDocumentToolCalls,
+                    maxToolCallsBeforeEarlyCompletion: 1,
                     earlyCompletionCheck: ct => HasPersistedDocumentContentAsync(
                         branchLanguage.Id,
                         catalogPath,
                         attemptStartedAt,
-                        ct));
+                        ct),
+                    toolMode: attemptToolMode,
+                    stopAtToolCallLimitWithoutCompletion: !isWriteOnlyRepair,
+                    hardToolCallLimit: _options.MaxDocumentToolCalls);
+
+                var attemptEvidence = sourceTool.GetCollectedEvidence();
+                if (!string.IsNullOrWhiteSpace(attemptEvidence))
+                {
+                    if (collectedSourceEvidence.Length > 0)
+                    {
+                        collectedSourceEvidence.AppendLine().AppendLine();
+                    }
+
+                    collectedSourceEvidence.Append(attemptEvidence);
+                }
 
                 if (await HasPersistedDocumentContentAsync(branchLanguage.Id, catalogPath, attemptStartedAt, cancellationToken))
                 {
@@ -1181,7 +1277,10 @@ Please start executing the task.";
         AiExecutionContext executionContext,
         CancellationToken cancellationToken,
         int? maxToolCallsBeforeEarlyCompletion = null,
-        Func<CancellationToken, Task<bool>>? earlyCompletionCheck = null)
+        Func<CancellationToken, Task<bool>>? earlyCompletionCheck = null,
+        ChatToolMode? toolMode = null,
+        bool stopAtToolCallLimitWithoutCompletion = false,
+        int? hardToolCallLimit = null)
     {
         var model = ai.ModelId;
         var requestOptions = ai.ToRequestOptions();
@@ -1212,7 +1311,7 @@ Please start executing the task.";
                 {
                     ChatOptions = new ChatOptions()
                     {
-                        ToolMode = ChatToolMode.Auto,
+                        ToolMode = toolMode ?? ChatToolMode.Auto,
                         MaxOutputTokens = _options.MaxOutputTokens,
                         Instructions = systemPrompt,
                         Tools = tools,
@@ -1255,6 +1354,7 @@ Please start executing the task.";
                 var usageAccumulator = new AiUsageAccumulator();
                 var toolCallCount = 0;
                 var stoppedAfterPersistedContent = false;
+                var stoppedAtToolCallLimit = false;
 
                 _logger.LogDebug("Starting streaming response. Operation: {Operation}", operationName);
 
@@ -1297,19 +1397,38 @@ Please start executing the task.";
 
                     usageAccumulator.Add(update);
 
-                    if (!stoppedAfterPersistedContent &&
+                    if (!stoppedAtToolCallLimit &&
                         maxToolCallsBeforeEarlyCompletion is > 0 &&
                         toolCallCount >= maxToolCallsBeforeEarlyCompletion.Value &&
-                        earlyCompletionCheck != null &&
-                        await earlyCompletionCheck(cancellationToken))
+                        earlyCompletionCheck != null)
                     {
-                        stoppedAfterPersistedContent = true;
-                        _logger.LogInformation(
-                            "Stopping AI agent early after persisted content. Operation: {Operation}, Model: {Model}, ToolCalls: {ToolCalls}, MaxToolCalls: {MaxToolCalls}",
+                        if (await earlyCompletionCheck(cancellationToken))
+                        {
+                            stoppedAfterPersistedContent = true;
+                            stoppedAtToolCallLimit = true;
+                            _logger.LogInformation(
+                                "Stopping AI agent early after persisted content. Operation: {Operation}, Model: {Model}, ToolCalls: {ToolCalls}, MaxToolCalls: {MaxToolCalls}",
+                                operationName,
+                                model,
+                                toolCallCount,
+                                maxToolCallsBeforeEarlyCompletion.Value);
+                            break;
+                        }
+
+                    }
+
+                    if (!stoppedAtToolCallLimit &&
+                        stopAtToolCallLimitWithoutCompletion &&
+                        hardToolCallLimit is > 0 &&
+                        toolCallCount >= hardToolCallLimit.Value)
+                    {
+                        stoppedAtToolCallLimit = true;
+                        _logger.LogWarning(
+                            "Stopping AI agent at tool-call limit without persisted content. Operation: {Operation}, Model: {Model}, ToolCalls: {ToolCalls}, MaxToolCalls: {MaxToolCalls}",
                             operationName,
                             model,
                             toolCallCount,
-                            maxToolCallsBeforeEarlyCompletion.Value);
+                            hardToolCallLimit.Value);
                         break;
                     }
 
