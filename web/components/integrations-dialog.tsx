@@ -36,7 +36,6 @@ export function IntegrationsDialog({ open, onOpenChange }: IntegrationsDialogPro
 
   const [slackLoading, setSlackLoading] = useState(false);
   const [slackConnected, setSlackConnected] = useState(false);
-  const [slackError, setSlackError] = useState(false);
   const [mcpUrlCopied, setMcpUrlCopied] = useState(false);
   const [configCopied, setConfigCopied] = useState(false);
 
@@ -57,21 +56,29 @@ export function IntegrationsDialog({ open, onOpenChange }: IntegrationsDialogPro
   useEffect(() => {
     if (!open) return;
 
-    setSlackLoading(true);
-    setSlackError(false);
-    setSlackConnected(false);
-
-    getChatProviderConfigs()
+    let cancelled = false;
+    void Promise.resolve()
+      .then(() => {
+        if (cancelled) return null;
+        setSlackLoading(true);
+        setSlackConnected(false);
+        return getChatProviderConfigs();
+      })
       .then((providers) => {
+        if (cancelled || !providers) return;
         const slack = providers.find((p) => p.platform === "slack");
         setSlackConnected(slack ? slack.isEnabled && slack.isRegistered : false);
       })
       .catch(() => {
-        setSlackError(true);
+        if (!cancelled) setSlackConnected(false);
       })
       .finally(() => {
-        setSlackLoading(false);
+        if (!cancelled) setSlackLoading(false);
       });
+
+    return () => {
+      cancelled = true;
+    };
   }, [open]);
 
   const copyToClipboard = useCallback(async (text: string, type: "url" | "config") => {
@@ -144,6 +151,22 @@ export function IntegrationsDialog({ open, onOpenChange }: IntegrationsDialogPro
               <h3 className="font-medium">{t("home.integrations.mcp.title")}</h3>
             </div>
             <p className="text-sm text-muted-foreground">{t("home.integrations.mcp.description")}</p>
+
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm dark:border-amber-800 dark:bg-amber-950/30">
+              <p className="font-medium text-amber-900 dark:text-amber-200">
+                {t("common.mcp.skillRequiredTitle")}
+              </p>
+              <p className="mt-1 leading-5 text-amber-800 dark:text-amber-300">
+                {t("common.mcp.skillRequiredDesc")}{" "}
+                <a
+                  href="/skills/YDHW-repo-wiki.zip"
+                  download
+                  className="font-medium underline underline-offset-4"
+                >
+                  {t("common.mcp.downloadSkill")}
+                </a>
+              </p>
+            </div>
 
             {/* MCP URL */}
             <div className="space-y-1.5">

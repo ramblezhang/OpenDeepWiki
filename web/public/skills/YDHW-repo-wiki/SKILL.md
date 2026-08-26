@@ -28,6 +28,20 @@ timeout: 30000
 
 如果当前会话已经暴露 `youdaohw_repo_wiki_*` 工具，说明 MCP 已经可用，不需要再安装。
 
+访问控制使用每次业务工具调用中的 `caller_user` 声明参数，不使用 Token、OAuth 或自定义 Authorization Header。身份方案不会要求修改 Codex/OpenCode/Cursor 已有的 MCP 配置；只有 MCP 本身尚未安装时，才沿用原有流程写入服务名和 URL。
+
+### 调用身份
+
+在当前会话第一次调用 Wiki 业务工具前获取一次本机登录用户名，并对后续全部 Wiki 工具调用复用完全相同的值：
+
+1. 原生 Windows 运行 `whoami`。
+2. WSL（存在 `WSL_INTEROP` / `WSL_DISTRO_NAME`，或 kernel release 包含 `microsoft`）优先运行 `cmd.exe /c whoami`；失败后运行 `id -un`，再失败可尝试 `whoami`。
+3. Linux/macOS 运行 `id -un`；失败后运行 `whoami`。
+4. 只去掉命令输出首尾的换行和空白，不拆掉 `DOMAIN\user` 的域前缀，也不改大小写。不要用 `$USER`、`$USERNAME`、Git 作者或提问者名称猜测身份。
+5. 每次调用下面列出的七个 Wiki 工具时，都显式传 `caller_user=<本会话用户名>`。`initialize` 和 `tools/list` 不需要该参数。
+
+无法取得用户名时停止业务调用并说明失败命令。服务端返回 `CALLER_USER_REQUIRED`、`CALLER_USER_INVALID`、`USER_NOT_ALLOWED`、`USER_DISABLED`、`SERVICE_NOT_ALLOWED` 或 `ACCESS_CONFIG_INVALID` 时，原样报告错误码并停止；不要尝试其他用户名、别名、Token 或 Header 绕过。该用户名是内网可追责的声明值，不防止用户主动伪造，因此不能替代公网场景的强认证。
+
 ### Agent 环境识别
 
 先根据当前运行环境判断用户正在使用哪种 agent：
@@ -154,7 +168,7 @@ transport/type: remote/http/streamable-http（按 Codex 当前版本命名）
 
 3. **选择查询工具**
 
-   MCP 可用后，按问题类型选择工具：
+   MCP 可用后，先按“调用身份”取得本会话用户名，再按问题类型选择工具；下面每个业务调用都必须携带同一个 `caller_user`：
 
    - 不确定用户问题属于哪个仓库：先用 `youdaohw_repo_wiki_search_repositories`，再用 `youdaohw_repo_wiki_search_docs`。
    - 用户已经给出 owner/repo 或仓库名：直接用 `youdaohw_repo_wiki_search_docs`，并传入明确仓库范围。

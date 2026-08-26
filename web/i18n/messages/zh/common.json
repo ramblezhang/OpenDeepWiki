@@ -188,6 +188,9 @@
     "allToolsUnrestricted": "全部工具（未限制）",
     "claudeHint": "将以上配置添加到 Claude Desktop 配置文件，然后重启 Claude。",
     "cursorHint": "将以上配置添加到 Cursor 的 MCP 配置文件（.cursor/mcp.json）。",
+    "skillRequiredTitle": "必须配套新版 YDHW Repo Wiki SKILL",
+    "skillRequiredDesc": "页面中的裸 MCP 配置只登记服务地址，不会自动传递本机登录用户名。请安装并使用新版 SKILL；否则兼容期调用只会记为 legacy_anonymous，严格模式下会被拒绝。",
+    "downloadSkill": "下载新版 SKILL",
     "generalGuide": "API 参考",
     "generalGuideDesc": "你也可以通过公开 API 端点以编程方式获取提供商列表。"
   },

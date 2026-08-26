@@ -159,8 +159,12 @@ public class AdminMcpProviderService : IAdminMcpProviderService
             query = query.Where(l => l.McpProviderId == filter.McpProviderId);
         if (!string.IsNullOrEmpty(filter.UserId))
             query = query.Where(l => l.UserId == filter.UserId);
+        if (!string.IsNullOrEmpty(filter.CallerUser))
+            query = query.Where(l => l.CanonicalUser == filter.CallerUser || l.PresentedUser == filter.CallerUser);
         if (!string.IsNullOrEmpty(filter.ToolName))
             query = query.Where(l => l.ToolName.Contains(filter.ToolName));
+        if (!string.IsNullOrEmpty(filter.Outcome))
+            query = query.Where(l => l.Outcome == filter.Outcome);
 
         var total = await query.CountAsync();
 
@@ -193,6 +197,11 @@ public class AdminMcpProviderService : IAdminMcpProviderService
                 Id = l.Id,
                 UserId = l.UserId,
                 UserName = l.UserId != null && userNames.TryGetValue(l.UserId, out var uName) ? uName : null,
+                PresentedUser = l.PresentedUser,
+                CanonicalUser = l.CanonicalUser,
+                IdentityType = l.IdentityType,
+                Outcome = l.Outcome,
+                ErrorCode = l.ErrorCode,
                 McpProviderId = l.McpProviderId,
                 McpProviderName = l.McpProviderId != null && providerNames.TryGetValue(l.McpProviderId, out var pName) ? pName : null,
                 ToolName = l.ToolName,
@@ -216,18 +225,45 @@ public class AdminMcpProviderService : IAdminMcpProviderService
         var startDate = DateTime.UtcNow.Date.AddDays(-days + 1);
         var response = new McpUsageStatisticsResponse();
 
-        // Try from daily statistics first
-        var dailyStats = await _context.McpDailyStatistics
-            .Where(s => !s.IsDeleted && s.Date >= startDate)
-            .GroupBy(s => s.Date)
+        response.UserUsages = await _context.McpUsageLogs
+            .Where(log => !log.IsDeleted
+                          && log.IdentityType != null
+                          && log.CreatedAt >= startDate)
+            .GroupBy(log => new
+            {
+                User = log.CanonicalUser ?? log.PresentedUser ?? "legacy_anonymous",
+                log.IdentityType
+            })
+            .Select(group => new McpUserUsage
+            {
+                User = group.Key.User,
+                IdentityType = group.Key.IdentityType,
+                RequestCount = group.LongCount(),
+                SuccessCount = group.LongCount(log => log.ResponseStatus >= 200 && log.ResponseStatus < 300),
+                ErrorCount = group.LongCount(log => log.ResponseStatus >= 400),
+                DeniedCount = group.LongCount(log => log.Outcome != null && log.Outcome.StartsWith("denied_")),
+                LastAccessAt = group.Max(log => log.CreatedAt)
+            })
+            .OrderByDescending(item => item.RequestCount)
+            .ThenBy(item => item.User)
+            .Take(200)
+            .ToListAsync();
+
+        // Compute from versioned tool-call logs so pre-migration HTTP request rows can never
+        // contaminate the user-facing totals, even before the materialized daily table rebuilds.
+        var dailyStats = await _context.McpUsageLogs
+            .Where(log => !log.IsDeleted
+                          && log.IdentityType != null
+                          && log.CreatedAt >= startDate)
+            .GroupBy(log => log.CreatedAt.Date)
             .Select(g => new
             {
                 Date = g.Key,
-                RequestCount = g.Sum(s => s.RequestCount),
-                SuccessCount = g.Sum(s => s.SuccessCount),
-                ErrorCount = g.Sum(s => s.ErrorCount),
-                InputTokens = g.Sum(s => s.InputTokens),
-                OutputTokens = g.Sum(s => s.OutputTokens)
+                RequestCount = g.LongCount(),
+                SuccessCount = g.LongCount(log => log.ResponseStatus >= 200 && log.ResponseStatus < 300),
+                ErrorCount = g.LongCount(log => log.ResponseStatus >= 400),
+                InputTokens = g.Sum(log => (long)log.InputTokens),
+                OutputTokens = g.Sum(log => (long)log.OutputTokens)
             })
             .ToListAsync();
 

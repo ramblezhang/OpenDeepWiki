@@ -52,7 +52,9 @@ public static class AdminMcpProviderEndpoints
         mcpGroup.MapGet("/usage-logs", async (
             [FromQuery] string? mcpProviderId,
             [FromQuery] string? userId,
+            [FromQuery] string? callerUser,
             [FromQuery] string? toolName,
+            [FromQuery] string? outcome,
             [FromQuery] int page,
             [FromQuery] int pageSize,
             [FromServices] IAdminMcpProviderService service) =>
@@ -65,7 +67,9 @@ public static class AdminMcpProviderEndpoints
             {
                 McpProviderId = mcpProviderId,
                 UserId = userId,
+                CallerUser = callerUser,
                 ToolName = toolName,
+                Outcome = outcome,
                 Page = page,
                 PageSize = pageSize
             };

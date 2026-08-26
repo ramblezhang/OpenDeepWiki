@@ -69,10 +69,11 @@ export function CustomHome() {
             <article className="min-w-0 rounded-lg border bg-background p-4">
               <div className="flex min-w-0 items-center gap-2">
                 <Server className="h-4 w-4 shrink-0 text-primary" />
-                <h3 className="truncate text-sm font-semibold">MCP 安装</h3>
+                <h3 className="truncate text-sm font-semibold">MCP 安装（需配套 SKILL）</h3>
               </div>
               <p className="mt-2 text-sm leading-6 text-muted-foreground">
-                有道硬件 Wiki MCP 是 remote MCP server；已暴露工具时无需重复安装。
+                请安装本页提供的新版 YDHW Repo Wiki SKILL。下方命令只登记 remote MCP 的服务名和 URL，
+                单独执行不会为业务调用补充本机登录用户名；兼容期只会记为 legacy_anonymous，严格模式下会被拒绝。
               </p>
               <div className="mt-3 space-y-2">
                 <div className="rounded-md bg-muted px-3 py-2 text-xs text-muted-foreground">

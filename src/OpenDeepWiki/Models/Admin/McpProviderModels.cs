@@ -49,6 +49,11 @@ public class McpUsageLogDto
     public string Id { get; set; } = string.Empty;
     public string? UserId { get; set; }
     public string? UserName { get; set; }
+    public string? PresentedUser { get; set; }
+    public string? CanonicalUser { get; set; }
+    public string? IdentityType { get; set; }
+    public string? Outcome { get; set; }
+    public string? ErrorCode { get; set; }
     public string? McpProviderId { get; set; }
     public string? McpProviderName { get; set; }
     public string ToolName { get; set; } = string.Empty;
@@ -69,7 +74,9 @@ public class McpUsageLogFilter
 {
     public string? McpProviderId { get; set; }
     public string? UserId { get; set; }
+    public string? CallerUser { get; set; }
     public string? ToolName { get; set; }
+    public string? Outcome { get; set; }
     public int Page { get; set; } = 1;
     public int PageSize { get; set; } = 20;
 }
@@ -96,6 +103,18 @@ public class McpUsageStatisticsResponse
     public long TotalErrors { get; set; }
     public long TotalInputTokens { get; set; }
     public long TotalOutputTokens { get; set; }
+    public List<McpUserUsage> UserUsages { get; set; } = new();
+}
+
+public class McpUserUsage
+{
+    public string User { get; set; } = string.Empty;
+    public string? IdentityType { get; set; }
+    public long RequestCount { get; set; }
+    public long SuccessCount { get; set; }
+    public long ErrorCount { get; set; }
+    public long DeniedCount { get; set; }
+    public DateTime LastAccessAt { get; set; }
 }
 
 /// <summary>

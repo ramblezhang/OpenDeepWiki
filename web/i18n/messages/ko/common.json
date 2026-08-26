@@ -190,6 +190,9 @@
     "allToolsUnrestricted": "모든 도구(제한 없음)",
     "claudeHint": "위 구성을 Claude Desktop 설정 파일에 추가한 뒤 Claude를 재시작하세요.",
     "cursorHint": "위 구성을 Cursor MCP 설정 파일(.cursor/mcp.json)에 추가하세요.",
+    "skillRequiredTitle": "최신 YDHW Repo Wiki SKILL이 필요합니다",
+    "skillRequiredDesc": "이 페이지의 기본 MCP 구성은 서버 URL만 등록하며 로컬 로그인 이름을 전송하지 않습니다. 최신 SKILL을 설치해 사용하세요. 그렇지 않으면 마이그레이션 중에는 legacy_anonymous로 기록되고 엄격 모드에서는 거부됩니다.",
+    "downloadSkill": "최신 SKILL 다운로드",
     "generalGuide": "API 참조",
     "generalGuideDesc": "공개 API 엔드포인트를 통해 프로그램으로 제공자 목록을 조회할 수 있습니다."
   },

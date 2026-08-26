@@ -7,10 +7,12 @@ import {
   updateMcpProvider,
   deleteMcpProvider,
   getMcpUsageLogs,
+  getMcpUsageStatistics,
   getModelConfigs,
   type McpProvider,
   type McpProviderRequest,
   type McpUsageLog,
+  type McpUsageStatistics,
   type PagedResult,
   type ModelConfig,
 } from "@/lib/admin-api";
@@ -94,6 +96,7 @@ export default function AdminMcpProvidersPage() {
 
   // Usage logs state
   const [usageLogs, setUsageLogs] = useState<PagedResult<McpUsageLog> | null>(null);
+  const [usageStats, setUsageStats] = useState<McpUsageStatistics | null>(null);
   const [logsPage, setLogsPage] = useState(1);
   const [logsLoading, setLogsLoading] = useState(false);
 
@@ -120,8 +123,12 @@ export default function AdminMcpProvidersPage() {
   async function loadUsageLogs(page: number = 1) {
     setLogsLoading(true);
     try {
-      const result = await getMcpUsageLogs({ page, pageSize: 20 });
+      const [result, stats] = await Promise.all([
+        getMcpUsageLogs({ page, pageSize: 20 }),
+        getMcpUsageStatistics(30),
+      ]);
       setUsageLogs(result);
+      setUsageStats(stats);
       setLogsPage(page);
     } catch (error) {
       console.error("Failed to load usage logs:", error);
@@ -292,7 +299,39 @@ export default function AdminMcpProvidersPage() {
           )}
         </TabsContent>
 
-        <TabsContent value="logs">
+        <TabsContent value="logs" className="space-y-4">
+          {usageStats && usageStats.userUsages.length > 0 && (
+            <Card>
+              <CardHeader>
+                <CardTitle>{t("admin.mcpProviders.userStatsTitle")}</CardTitle>
+                <CardDescription>{t("admin.mcpProviders.userStatsDescription")}</CardDescription>
+              </CardHeader>
+              <CardContent className="overflow-x-auto">
+                <table className="w-full text-sm">
+                  <thead className="border-b bg-muted/50">
+                    <tr>
+                      <th className="px-4 py-3 text-left font-medium">{t("admin.mcpProviders.logUser")}</th>
+                      <th className="px-4 py-3 text-right font-medium">{t("admin.mcpProviders.requestCount")}</th>
+                      <th className="px-4 py-3 text-right font-medium">{t("admin.mcpProviders.successCount")}</th>
+                      <th className="px-4 py-3 text-right font-medium">{t("admin.mcpProviders.deniedCount")}</th>
+                      <th className="px-4 py-3 text-left font-medium">{t("admin.mcpProviders.lastAccess")}</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {usageStats.userUsages.map((item) => (
+                      <tr key={`${item.identityType || "unknown"}:${item.user}`} className="border-b last:border-0">
+                        <td className="px-4 py-3 font-mono text-xs">{item.user}</td>
+                        <td className="px-4 py-3 text-right">{item.requestCount}</td>
+                        <td className="px-4 py-3 text-right">{item.successCount}</td>
+                        <td className="px-4 py-3 text-right">{item.deniedCount}</td>
+                        <td className="px-4 py-3 text-xs">{new Date(item.lastAccessAt).toLocaleString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </CardContent>
+            </Card>
+          )}
           {logsLoading ? (
             <div className="flex items-center justify-center h-32">
               <Loader2 className="h-6 w-6 animate-spin" />
@@ -317,11 +356,16 @@ export default function AdminMcpProvidersPage() {
                         <td className="px-4 py-3 text-xs">
                           {new Date(log.createdAt).toLocaleString()}
                         </td>
-                        <td className="px-4 py-3">{log.userName || log.userId || "-"}</td>
+                        <td className="px-4 py-3">
+                          <div>{log.canonicalUser || log.userName || log.userId || "-"}</div>
+                          {log.presentedUser && log.presentedUser !== log.canonicalUser && (
+                            <div className="text-xs text-muted-foreground">{log.presentedUser}</div>
+                          )}
+                        </td>
                         <td className="px-4 py-3 font-mono text-xs">{log.toolName}</td>
                         <td className="px-4 py-3">
                           <Badge variant={log.responseStatus < 400 ? "secondary" : "destructive"}>
-                            {log.responseStatus}
+                            {log.outcome || log.responseStatus}
                           </Badge>
                         </td>
                         <td className="px-4 py-3">{log.durationMs}ms</td>

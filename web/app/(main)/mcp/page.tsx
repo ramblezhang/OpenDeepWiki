@@ -25,6 +25,8 @@ import {
 import { useTranslations } from "@/hooks/use-translations";
 import { api } from "@/lib/api-client";
 
+const SKILL_DOWNLOAD_URL = "/skills/YDHW-repo-wiki.zip";
+
 interface McpProviderPublic {
   id: string;
   name: string;
@@ -129,6 +131,23 @@ export default function McpPage() {
           <p className="text-lg text-muted-foreground max-w-2xl mx-auto">
             {t("common.mcp.description")}
           </p>
+        </div>
+
+        <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-800 dark:bg-amber-950/30">
+          <div className="flex items-start gap-3">
+            <Shield className="mt-0.5 h-5 w-5 shrink-0 text-amber-700 dark:text-amber-300" />
+            <div className="space-y-1">
+              <p className="font-medium text-amber-900 dark:text-amber-200">
+                {t("common.mcp.skillRequiredTitle")}
+              </p>
+              <p className="text-sm leading-6 text-amber-800 dark:text-amber-300">
+                {t("common.mcp.skillRequiredDesc")}{" "}
+                <a className="font-medium underline underline-offset-4" href={SKILL_DOWNLOAD_URL} download>
+                  {t("common.mcp.downloadSkill")}
+                </a>
+              </p>
+            </div>
+          </div>
         </div>
 
         {/* Feature cards */}

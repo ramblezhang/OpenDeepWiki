@@ -94,11 +94,22 @@ export interface McpDailyUsage {
 
 export interface McpUsageStatistics {
   dailyUsages: McpDailyUsage[];
+  userUsages: McpUserUsage[];
   totalRequests: number;
   totalSuccessful: number;
   totalErrors: number;
   totalInputTokens: number;
   totalOutputTokens: number;
+}
+
+export interface McpUserUsage {
+  user: string;
+  identityType?: string;
+  requestCount: number;
+  successCount: number;
+  errorCount: number;
+  deniedCount: number;
+  lastAccessAt: string;
 }
 
 export async function getDashboardStatistics(days: number = 7): Promise<DashboardStatistics> {
@@ -158,6 +169,11 @@ export interface McpUsageLog {
   id: string;
   userId?: string;
   userName?: string;
+  presentedUser?: string;
+  canonicalUser?: string;
+  identityType?: string;
+  outcome?: string;
+  errorCode?: string;
   mcpProviderId?: string;
   mcpProviderName?: string;
   toolName: string;
@@ -181,7 +197,9 @@ export interface PagedResult<T> {
 export interface McpUsageLogFilter {
   mcpProviderId?: string;
   userId?: string;
+  callerUser?: string;
   toolName?: string;
+  outcome?: string;
   page?: number;
   pageSize?: number;
 }
@@ -218,7 +236,9 @@ export async function getMcpUsageLogs(filter: McpUsageLogFilter): Promise<PagedR
   const params = new URLSearchParams();
   if (filter.mcpProviderId) params.append("mcpProviderId", filter.mcpProviderId);
   if (filter.userId) params.append("userId", filter.userId);
+  if (filter.callerUser) params.append("callerUser", filter.callerUser);
   if (filter.toolName) params.append("toolName", filter.toolName);
+  if (filter.outcome) params.append("outcome", filter.outcome);
   params.append("page", (filter.page ?? 1).toString());
   params.append("pageSize", (filter.pageSize ?? 20).toString());
 

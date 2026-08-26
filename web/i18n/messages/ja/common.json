@@ -190,6 +190,9 @@
     "allToolsUnrestricted": "すべてのツール（制限なし）",
     "claudeHint": "上記設定を Claude Desktop の設定ファイルに追加し、再起動してください。",
     "cursorHint": "上記設定を Cursor MCP 設定ファイル (.cursor/mcp.json) に追加してください。",
+    "skillRequiredTitle": "最新版の YDHW Repo Wiki SKILL が必要です",
+    "skillRequiredDesc": "このページの MCP 設定だけではサーバー URL の登録しか行われず、ローカルのログイン名は送信されません。最新版の SKILL をインストールして使用してください。移行期間中は legacy_anonymous として記録され、厳格モードでは拒否されます。",
+    "downloadSkill": "最新版の SKILL をダウンロード",
     "generalGuide": "API リファレンス",
     "generalGuideDesc": "公開 API エンドポイントを通じてプログラムでプロバイダー一覧を取得できます。"
   },
