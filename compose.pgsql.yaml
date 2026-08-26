@@ -7,6 +7,11 @@ services:
     ports:
       - "8080:8080"
     restart: unless-stopped
+    user: "${OPENDEEPWIKI_UID:-1000}:${OPENDEEPWIKI_GID:-1000}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     depends_on:
       postgres:
         condition: service_healthy
@@ -64,6 +69,15 @@ services:
 
       # Incremental update worker (set INCREMENTAL_UPDATE_ENABLED=false to pause scheduled scans)
       - IncrementalUpdate__Enabled=${INCREMENTAL_UPDATE_ENABLED:-true}
+
+      # MCP declared-user access control. Keep false during the legacy-client migration window.
+      - MCP_ACCESS_FILE=/data/mcp-access.yaml
+      - MCP_REQUIRE_CALLER_USER=${MCP_REQUIRE_CALLER_USER:-false}
+      - MCP_USAGE_RETENTION_DAYS=${MCP_USAGE_RETENTION_DAYS:-180}
+      - MCP_USAGE_FALLBACK_FILE=/data/mcp-usage-fallback.jsonl
+      - MCP_USAGE_FALLBACK_MAX_BYTES=${MCP_USAGE_FALLBACK_MAX_BYTES:-10485760}
+      - MCP_USAGE_FALLBACK_BACKUP_COUNT=${MCP_USAGE_FALLBACK_BACKUP_COUNT:-12}
+      - FORWARDED_HEADERS_TRUSTED_NETWORK=${FORWARDED_HEADERS_TRUSTED_NETWORK:-192.168.0.0/20}
     volumes:
       - ./data:/data
 

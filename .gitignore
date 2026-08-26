@@ -6,6 +6,10 @@
 # dotenv files
 .env
 
+# Deployment-local MCP caller allowlist (contains internal user identities)
+/data/mcp-access.yaml
+/data/mcp-usage-fallback.jsonl*
+
 # User-specific files
 *.rsuser
 *.suo

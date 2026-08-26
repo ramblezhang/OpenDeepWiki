@@ -30,6 +30,8 @@ RUN groupadd --system --gid 1001 nodejs && \
 COPY --from=builder /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
+COPY --from=builder --chown=nextjs:nodejs /app/socket-forwarding-headers.cjs ./socket-forwarding-headers.cjs
+COPY --from=builder --chown=nextjs:nodejs /app/force-client-ip.cjs ./force-client-ip.cjs
 
 # 不复制 .env 文件，API_PROXY_URL 通过运行时环境变量传入
 
@@ -40,4 +42,4 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME="0.0.0.0"
 
-CMD ["node", "server.js"]
+CMD ["node", "--require", "./force-client-ip.cjs", "server.js"]
