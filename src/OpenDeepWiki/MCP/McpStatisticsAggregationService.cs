@@ -25,6 +25,19 @@ public class McpStatisticsAggregationService : BackgroundService
         // Wait a bit before first run to let the app start up
         await Task.Delay(TimeSpan.FromMinutes(2), stoppingToken);
 
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var logService = scope.ServiceProvider.GetRequiredService<IMcpUsageLogService>();
+            await logService.ReplayFallbackLogsAsync();
+            await logService.RebuildDailyStatisticsAsync();
+            await logService.PruneExpiredUsageDataAsync();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "MCP 每日统计启动重算异常");
+        }
+
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -32,10 +45,11 @@ public class McpStatisticsAggregationService : BackgroundService
                 using var scope = _scopeFactory.CreateScope();
                 var logService = scope.ServiceProvider.GetRequiredService<IMcpUsageLogService>();
 
-                // Aggregate today and yesterday
+                await logService.ReplayFallbackLogsAsync();
                 var today = DateTime.UtcNow.Date;
                 await logService.AggregateDailyStatisticsAsync(today);
                 await logService.AggregateDailyStatisticsAsync(today.AddDays(-1));
+                await logService.PruneExpiredUsageDataAsync();
 
                 _logger.LogDebug("MCP 统计聚合完成");
             }

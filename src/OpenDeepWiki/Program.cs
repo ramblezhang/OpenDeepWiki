@@ -304,6 +304,11 @@ try
     // 注册 MCP 提供商管理服务
     builder.Services.AddScoped<IAdminMcpProviderService, AdminMcpProviderService>();
     builder.Services.AddScoped<IMcpUsageLogService, McpUsageLogService>();
+    builder.Services.AddSingleton<IMcpCallerAccessPolicy>(services =>
+        new McpCallerAccessPolicy(
+            builder.Configuration["MCP_ACCESS_FILE"] ?? "/data/mcp-access.yaml",
+            builder.Configuration.GetValue("MCP_REQUIRE_CALLER_USER", false),
+            services.GetRequiredService<ILogger<McpCallerAccessPolicy>>()));
     builder.Services.AddHostedService<McpStatisticsAggregationService>();
 
     // MCP server registration (official MCP server + scope via ConfigureSessionOptions)
@@ -348,6 +353,11 @@ try
                     return Task.CompletedTask;
                 };
             })
+            .WithRequestFilters(filters =>
+            {
+                filters.AddListToolsFilter(McpCallerAccessFilter.CreateListTools());
+                filters.AddCallToolFilter(McpCallerAccessFilter.Create());
+            })
             .WithTools<McpGlobalTools>()
             .WithTools<McpRepositoryTools>();
     }
@@ -361,12 +371,26 @@ try
     app.UseStaticFiles();
 
     // Configure forwarded headers for reverse proxy scenarios
-    app.UseForwardedHeaders(new ForwardedHeadersOptions
+    var forwardedHeadersOptions = new ForwardedHeadersOptions
     {
         ForwardedHeaders = Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedFor
                            | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedProto
-                           | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost
-    });
+                           | Microsoft.AspNetCore.HttpOverrides.ForwardedHeaders.XForwardedHost,
+        ForwardLimit = 1
+    };
+    var trustedProxyNetwork = builder.Configuration["FORWARDED_HEADERS_TRUSTED_NETWORK"];
+    if (!string.IsNullOrWhiteSpace(trustedProxyNetwork)
+        && System.Net.IPNetwork.TryParse(trustedProxyNetwork, out var parsedProxyNetwork))
+    {
+        forwardedHeadersOptions.KnownIPNetworks.Add(parsedProxyNetwork);
+    }
+    else if (!string.IsNullOrWhiteSpace(trustedProxyNetwork))
+    {
+        app.Logger.LogWarning(
+            "FORWARDED_HEADERS_TRUSTED_NETWORK 配置无效，将不信任该代理网段: {Network}",
+            trustedProxyNetwork);
+    }
+    app.UseForwardedHeaders(forwardedHeadersOptions);
 
     if (app.Environment.IsDevelopment())
     {
@@ -380,7 +404,6 @@ try
     // MCP server endpoints (official MCP server + scope via ConfigureSessionOptions)
     if (mcpEnabled)
     {
-        app.UseMcpUsageLogging("/api/mcp");
         app.UseSseKeepAlive("/api/mcp");
         app.MapMcp("/api/mcp");
         app.MapMcp("/api/mcp/{owner}/{repo}");
@@ -404,7 +427,23 @@ try
     app.MapChatAppEndpoints();
     app.MapEmbedEndpoints();
 
-    app.MapGet("/health", () => Results.Ok(new { status = "healthy", timestamp = DateTime.UtcNow }));
+    app.MapGet("/health", (IMcpUsageLogService usageLogService) =>
+    {
+        var loggingHealth = usageLogService.GetLoggingHealth();
+        var payload = new
+        {
+            status = loggingHealth.Healthy ? "healthy" : "degraded",
+            timestamp = DateTime.UtcNow,
+            mcpUsageLogging = new
+            {
+                healthy = loggingHealth.Healthy,
+                pendingFiles = loggingHealth.PendingFiles,
+                pendingBytes = loggingHealth.PendingBytes,
+                quarantinedFiles = loggingHealth.QuarantinedFiles
+            }
+        };
+        return Results.Json(payload, statusCode: loggingHealth.Healthy ? 200 : 503);
+    });
     app.MapSystemEndpoints();
     app.MapIncrementalUpdateEndpoints();
     app.MapBranchGenerationEndpoints();

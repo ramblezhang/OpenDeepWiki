@@ -14,6 +14,36 @@ public class McpUsageLog : AggregateRoot<string>
     public string? UserId { get; set; }
 
     /// <summary>
+    /// 用户端实际提交的本机登录名。
+    /// </summary>
+    [StringLength(128)]
+    public string? PresentedUser { get; set; }
+
+    /// <summary>
+    /// 白名单 alias 归一化后的用户标识。
+    /// </summary>
+    [StringLength(128)]
+    public string? CanonicalUser { get; set; }
+
+    /// <summary>
+    /// 身份来源，例如 declared_username 或 legacy_anonymous。
+    /// </summary>
+    [StringLength(32)]
+    public string? IdentityType { get; set; }
+
+    /// <summary>
+    /// 调用结果分类，例如 authorized_success、authorized_error 或 denied_not_registered。
+    /// </summary>
+    [StringLength(64)]
+    public string? Outcome { get; set; }
+
+    /// <summary>
+    /// 稳定错误码，不包含允许用户列表或请求正文。
+    /// </summary>
+    [StringLength(64)]
+    public string? ErrorCode { get; set; }
+
+    /// <summary>
     /// 提供商 ID
     /// </summary>
     [StringLength(100)]

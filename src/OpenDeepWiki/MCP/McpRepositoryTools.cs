@@ -32,6 +32,7 @@ public class McpRepositoryTools
         [Description("Search query or question to answer.")] string query,
         [Description("Maximum number of documents to return (default: 5, max: 20)")] int maxResults = 5,
         [Description("Language code (default: en)")] string language = "en",
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         var repositoryScopeError = ValidateAndResolveRepositoryScope(mcpServer, out var resolvedOwner, out var resolvedName);
@@ -169,6 +170,7 @@ public class McpRepositoryTools
         [Description("Optional subdirectory relative to repo root, default is repository root.")] string? path = null,
         [Description("Maximum depth to traverse (default: 3)")] int maxDepth = 3,
         [Description("Maximum entries to return (default: 200)")] int maxEntries = 200,
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         var repositoryScopeError = ValidateAndResolveRepositoryScope(mcpServer, out var resolvedOwner, out var resolvedName);
@@ -221,6 +223,7 @@ public class McpRepositoryTools
         [Description("Relative file path from repository root")] string path,
         [Description("Line number to start reading from (1-based). Default: 1")] int offset = 1,
         [Description("Maximum number of lines to read. Default: 2000")] int limit = 2000,
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         var repositoryScopeError = ValidateAndResolveRepositoryScope(mcpServer, out var resolvedOwner, out var resolvedName);

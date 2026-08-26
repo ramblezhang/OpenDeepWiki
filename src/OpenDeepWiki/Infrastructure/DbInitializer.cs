@@ -512,12 +512,21 @@ public static class DbInitializer
         await AddSqliteColumnIfMissingAsync(connection, ctx, "RepositoryBranches", "LastGenerationCompletedAt", "TEXT");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "RepositoryProcessingLogs", "BranchId", "TEXT");
         await AddSqliteColumnIfMissingAsync(connection, ctx, "RepositoryProcessingLogs", "GenerationTaskId", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "McpUsageLogs", "PresentedUser", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "McpUsageLogs", "CanonicalUser", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "McpUsageLogs", "IdentityType", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "McpUsageLogs", "Outcome", "TEXT");
+        await AddSqliteColumnIfMissingAsync(connection, ctx, "McpUsageLogs", "ErrorCode", "TEXT");
         await ctx.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_RepositoryProcessingLogs_RepositoryId_BranchId_GenerationTaskId_CreatedAt ON RepositoryProcessingLogs (RepositoryId, BranchId, GenerationTaskId, CreatedAt)");
         await ctx.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_RepositoryProcessingLogs_BranchId ON RepositoryProcessingLogs (BranchId)");
         await ctx.Database.ExecuteSqlRawAsync(
             "CREATE INDEX IF NOT EXISTS IX_RepositoryProcessingLogs_GenerationTaskId ON RepositoryProcessingLogs (GenerationTaskId)");
+        await ctx.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_McpUsageLogs_CanonicalUser_CreatedAt ON McpUsageLogs (CanonicalUser, CreatedAt)");
+        await ctx.Database.ExecuteSqlRawAsync(
+            "CREATE INDEX IF NOT EXISTS IX_McpUsageLogs_Outcome ON McpUsageLogs (Outcome)");
     }
 
     private static async Task AddSqliteColumnIfMissingAsync(
@@ -759,12 +768,21 @@ public static class DbInitializer
             ALTER TABLE ""RepositoryBranches"" ADD COLUMN IF NOT EXISTS ""LastGenerationStartedAt"" TIMESTAMP WITH TIME ZONE;
             ALTER TABLE ""RepositoryBranches"" ADD COLUMN IF NOT EXISTS ""LastGenerationCompletedAt"" TIMESTAMP WITH TIME ZONE;
             ALTER TABLE ""RepositoryProcessingLogs"" ADD COLUMN IF NOT EXISTS ""BranchId"" TEXT;
-            ALTER TABLE ""RepositoryProcessingLogs"" ADD COLUMN IF NOT EXISTS ""GenerationTaskId"" TEXT;");
+            ALTER TABLE ""RepositoryProcessingLogs"" ADD COLUMN IF NOT EXISTS ""GenerationTaskId"" TEXT;
+            ALTER TABLE ""McpUsageLogs"" ADD COLUMN IF NOT EXISTS ""PresentedUser"" TEXT;
+            ALTER TABLE ""McpUsageLogs"" ADD COLUMN IF NOT EXISTS ""CanonicalUser"" TEXT;
+            ALTER TABLE ""McpUsageLogs"" ADD COLUMN IF NOT EXISTS ""IdentityType"" TEXT;
+            ALTER TABLE ""McpUsageLogs"" ADD COLUMN IF NOT EXISTS ""Outcome"" TEXT;
+            ALTER TABLE ""McpUsageLogs"" ADD COLUMN IF NOT EXISTS ""ErrorCode"" TEXT;");
         await ctx.Database.ExecuteSqlRawAsync(@"
             CREATE INDEX IF NOT EXISTS ""IX_RepositoryProcessingLogs_RepositoryId_BranchId_GenerationTaskId_CreatedAt"" ON ""RepositoryProcessingLogs"" (""RepositoryId"", ""BranchId"", ""GenerationTaskId"", ""CreatedAt"")");
         await ctx.Database.ExecuteSqlRawAsync(@"
             CREATE INDEX IF NOT EXISTS ""IX_RepositoryProcessingLogs_BranchId"" ON ""RepositoryProcessingLogs"" (""BranchId"")");
         await ctx.Database.ExecuteSqlRawAsync(@"
             CREATE INDEX IF NOT EXISTS ""IX_RepositoryProcessingLogs_GenerationTaskId"" ON ""RepositoryProcessingLogs"" (""GenerationTaskId"")");
+        await ctx.Database.ExecuteSqlRawAsync(@"
+            CREATE INDEX IF NOT EXISTS ""IX_McpUsageLogs_CanonicalUser_CreatedAt"" ON ""McpUsageLogs"" (""CanonicalUser"", ""CreatedAt"")");
+        await ctx.Database.ExecuteSqlRawAsync(@"
+            CREATE INDEX IF NOT EXISTS ""IX_McpUsageLogs_Outcome"" ON ""McpUsageLogs"" (""Outcome"")");
     }
 }

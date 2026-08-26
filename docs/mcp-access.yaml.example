@@ -1,0 +1,11 @@
+version: 1
+users:
+  zhangsan:
+    enabled: true
+    aliases:
+      - zhangsan
+      - YOUDAO\zhangsan
+      - zhangsan@youdao.com
+    services:
+      - wiki
+      - datasheet

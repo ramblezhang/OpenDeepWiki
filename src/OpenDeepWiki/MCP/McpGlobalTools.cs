@@ -28,6 +28,7 @@ public class McpGlobalTools
         IContext context,
         [Description("Optional text used to filter owner, repository name, description, or primary language.")] string? query = null,
         [Description("Maximum repositories to return. Default: 50, max: 200.")] int maxResults = 50,
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         maxResults = Clamp(maxResults, 1, 200);
@@ -130,6 +131,7 @@ public class McpGlobalTools
         [Description("User question or search query used to identify relevant repositories.")] string query,
         [Description("Preferred wiki language code. Default: zh. Pass empty to search every language.")] string language = "zh",
         [Description("Maximum repositories to return. Default: 5, max: 20.")] int maxResults = 5,
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         var normalizedQuery = Normalize(query);
@@ -169,6 +171,7 @@ public class McpGlobalTools
         [Description("Preferred wiki language code. Default: zh. Pass empty to search every language.")] string language = "zh",
         [Description("Maximum routed repositories when owner/repo are omitted. Default: 5, max: 20.")] int maxRepositories = 5,
         [Description("Maximum document results. Default: 10, max: 50.")] int maxResults = 10,
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         var normalizedQuery = Normalize(query);
@@ -267,6 +270,7 @@ public class McpGlobalTools
         [Description("Wiki document path returned by SearchDocs.")] string path,
         [Description("Preferred wiki language code. Default: zh. Pass empty to allow any language.")] string language = "zh",
         [Description("Optional branch name. If omitted, the first matching processed branch is used.")] string? branch = null,
+        [Description("Local login name reported by the client skill for access control and usage accounting.")] string? caller_user = null,
         CancellationToken cancellationToken = default)
     {
         var normalizedOwner = Normalize(owner);

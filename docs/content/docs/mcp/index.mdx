@@ -66,6 +66,17 @@ Streamable HTTP 是现代推荐的传输模式。如果你的 MCP 客户端支�
   将 `your-server:8080` 替换为 OpenDeepWiki 实例的实际 IP 地址和端口。
 </Callout>
 
+## 声明用户名访问控制
+
+私有内网部署可以让客户端在每次业务工具调用中传入 `caller_user`，再由服务端 YAML 白名单完成准入和使用统计。`initialize` 与 `tools/list` 不要求用户名；业务调用会记录原始/规范用户名、工具、结果和耗时。该方式不需要自定义 Authorization Header，也不要求已安装用户修改 MCP URL 配置。
+
+```text
+MCP_ACCESS_FILE=/data/mcp-access.yaml
+MCP_REQUIRE_CALLER_USER=false
+```
+
+先以 `false` 兼容旧客户端并观察 `legacy_anonymous`，发布新版 skill 后再切换为 `true`。用户名是内网声明值，不防止主动伪造，公网部署应使用 OAuth 或其他强认证。仓库维护者可参考 `docs/mcp-caller-access.md` 的完整白名单格式与迁移流程。
+
 ## 客户端配置示例
 
 ### Claude Desktop

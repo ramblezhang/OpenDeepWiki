@@ -234,6 +234,7 @@ http://localhost:8080/api/mcp?owner=AIDotNet&name=OpenDeepWiki
 
 - 设定 `MCP_ENABLED=false` 可关闭 MCP 端点。
 - 如果需要受保护资源式的 MCP OAuth，设置 `GOOGLE_CLIENT_ID` 和 `GOOGLE_CLIENT_SECRET`。
+- 公司内网的声明用户名白名单与使用统计通过 `MCP_ACCESS_FILE`、`MCP_REQUIRE_CALLER_USER` 和业务工具的 `caller_user` 参数启用，不需要自定义 MCP Header；上线顺序见 [docs/mcp-caller-access.md](docs/mcp-caller-access.md)。
 
 ## 可选的 Graphify 配置
 

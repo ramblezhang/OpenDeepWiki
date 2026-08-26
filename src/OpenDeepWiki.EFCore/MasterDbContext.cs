@@ -427,6 +427,21 @@ public abstract class MasterDbContext : DbContext, IContext
                 .IsRequired()
                 .HasMaxLength(100);
 
+            builder.Property(l => l.PresentedUser)
+                .HasMaxLength(128);
+
+            builder.Property(l => l.CanonicalUser)
+                .HasMaxLength(128);
+
+            builder.Property(l => l.IdentityType)
+                .HasMaxLength(32);
+
+            builder.Property(l => l.Outcome)
+                .HasMaxLength(64);
+
+            builder.Property(l => l.ErrorCode)
+                .HasMaxLength(64);
+
             builder.Property(l => l.ToolName)
                 .IsRequired()
                 .HasMaxLength(200);
@@ -443,6 +458,9 @@ public abstract class MasterDbContext : DbContext, IContext
             // 用户ID和创建时间索引
             builder.HasIndex(l => new { l.UserId, l.CreatedAt });
 
+            // 声明用户名和创建时间索引
+            builder.HasIndex(l => new { l.CanonicalUser, l.CreatedAt });
+
             // 提供商ID和创建时间索引
             builder.HasIndex(l => new { l.McpProviderId, l.CreatedAt });
 
@@ -451,6 +469,8 @@ public abstract class MasterDbContext : DbContext, IContext
 
             // 状态索引（基于 HTTP 状态码判断成功）
             builder.HasIndex(l => l.ResponseStatus);
+
+            builder.HasIndex(l => l.Outcome);
 
             // 创建时间索引
             builder.HasIndex(l => l.CreatedAt);

@@ -234,6 +234,7 @@ Optional:
 
 - Set `MCP_ENABLED=false` to disable MCP endpoints.
 - Set `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` if you want protected-resource MCP OAuth support.
+- For the internal declared-username allowlist and usage-accounting rollout, configure `MCP_ACCESS_FILE` and `MCP_REQUIRE_CALLER_USER` as described in [docs/mcp-caller-access.md](docs/mcp-caller-access.md). This uses the `caller_user` tool argument and does not require a custom MCP Header.
 
 ## Optional Graphify Configuration
 

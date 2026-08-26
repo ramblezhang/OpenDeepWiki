@@ -142,6 +142,58 @@ public class DbInitializerTests
     }
 
     [Fact]
+    public async Task InitializeAsync_WhenSqliteDatabaseIsMissingCallerUsageColumns_CreatesColumnsAndIndexes()
+    {
+        var dbPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.db");
+
+        try
+        {
+            await using (var setupContext = CreateContext(dbPath))
+            {
+                await setupContext.Database.EnsureCreatedAsync();
+                await setupContext.Database.ExecuteSqlRawAsync("DROP TABLE McpUsageLogs");
+                await setupContext.Database.ExecuteSqlRawAsync(@"
+                    CREATE TABLE McpUsageLogs (
+                        Id TEXT NOT NULL PRIMARY KEY,
+                        UserId TEXT NOT NULL,
+                        McpProviderId TEXT NOT NULL,
+                        ToolName TEXT NOT NULL,
+                        RequestSummary TEXT,
+                        ResponseStatus INTEGER NOT NULL,
+                        DurationMs INTEGER NOT NULL,
+                        InputTokens INTEGER NOT NULL,
+                        OutputTokens INTEGER NOT NULL,
+                        IpAddress TEXT,
+                        UserAgent TEXT,
+                        ErrorMessage TEXT,
+                        CreatedAt TEXT NOT NULL,
+                        UpdatedAt TEXT,
+                        DeletedAt TEXT,
+                        IsDeleted INTEGER NOT NULL,
+                        Version BLOB
+                    )");
+            }
+
+            await RunInitializerAsync(dbPath);
+
+            await using var verificationContext = CreateContext(dbPath);
+            Assert.True(await ColumnExistsAsync(verificationContext, "McpUsageLogs", "PresentedUser"));
+            Assert.True(await ColumnExistsAsync(verificationContext, "McpUsageLogs", "CanonicalUser"));
+            Assert.True(await ColumnExistsAsync(verificationContext, "McpUsageLogs", "IdentityType"));
+            Assert.True(await ColumnExistsAsync(verificationContext, "McpUsageLogs", "Outcome"));
+            Assert.True(await ColumnExistsAsync(verificationContext, "McpUsageLogs", "ErrorCode"));
+            Assert.True(await IndexExistsAsync(
+                verificationContext,
+                "IX_McpUsageLogs_CanonicalUser_CreatedAt"));
+            Assert.True(await IndexExistsAsync(verificationContext, "IX_McpUsageLogs_Outcome"));
+        }
+        finally
+        {
+            DeleteDatabase(dbPath);
+        }
+    }
+
+    [Fact]
     public async Task InitializeAsync_WhenGpt5ModelProviderTypeIsMissing_BackfillsResponses()
     {
         var dbPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.db");
@@ -280,6 +332,26 @@ public class DbInitializerTests
         var parameter = command.CreateParameter();
         parameter.ParameterName = "$name";
         parameter.Value = columnName;
+        command.Parameters.Add(parameter);
+
+        var result = await command.ExecuteScalarAsync();
+        return Convert.ToInt64(result) > 0;
+    }
+
+    private static async Task<bool> IndexExistsAsync(DbContext context, string indexName)
+    {
+        var connection = context.Database.GetDbConnection();
+        if (connection.State != System.Data.ConnectionState.Open)
+        {
+            await connection.OpenAsync();
+        }
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name = $name";
+
+        var parameter = command.CreateParameter();
+        parameter.ParameterName = "$name";
+        parameter.Value = indexName;
         command.Parameters.Add(parameter);
 
         var result = await command.ExecuteScalarAsync();
